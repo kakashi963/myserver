@@ -63,6 +63,22 @@ jobs:
           done
 
           echo "✅ All dependencies installed"
+                - name: Install and Enable SSH Server
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y openssh-server
+          # Enable root login and restart
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sed -i 's/PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          echo 'root:changeme123' | chpasswd  # Or generate random pw
+          mkdir -p /var/run/sshd
+          systemctl enable ssh || service ssh start || /usr/sbin/sshd -D &
+          sleep 2
+          # Verify
+          ss -tlnp | grep :22 && echo "✅ SSH on port 22"
+
+          
 
       - name: Configure Core RDP Settings
         run: |
@@ -154,9 +170,11 @@ jobs:
 
           # Connect with auth key
           tailscale up \
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=gh-runner-$GITHUB_RUN_ID \
-            --accept-routes
+          --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+           --hostname=gh-runner-$GITHUB_RUN_ID \
+           --accept-routes \
+            --ssh
+
 
           # Wait for IP with retries
           TS_IP=""
@@ -197,6 +215,8 @@ jobs:
           else
             echo "⚠️ Port 3389 not reachable via Tailscale yet — may still work after a few seconds"
           fi
+          tailscale ip -4 | xargs -I {} nc -zv {} 22 && echo "✅ SSH port open via Tailscale"
+
 
       - name: Maintain Connection
         run: |
