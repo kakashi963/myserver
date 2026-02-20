@@ -14,12 +14,14 @@ jobs:
     steps:
       - name: Install Dependencies
         run: |
+          export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
-          apt-get install -y \
-            kali-desktop-xfce xorg xrdp xorgxrdp \
+          apt-get install -y --no-install-recommends \
+            xfce4 xfce4-terminal \
+            xrdp xorgxrdp \
             dbus-x11 curl wget sudo ca-certificates gnupg
 
-          # Add Tailscale's official apt repository
+          # Add Tailscale repository
           curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
             | tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
 
@@ -49,14 +51,8 @@ jobs:
 
           echo "RDP_CREDS=User: RDP | Password: $PASSWORD" >> $GITHUB_ENV
 
-          if ! id "RDP" &>/dev/null; then
-            echo "User creation failed"
-            exit 1
-          fi
-
-      - name: Install Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
+          # Verify user was created
+          id RDP || { echo "User creation failed"; exit 1; }
 
       - name: Establish Tailscale Connection
         run: |
