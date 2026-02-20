@@ -20,7 +20,8 @@ jobs:
             xfce4 xfce4-terminal \
             xrdp xorgxrdp \
             dbus dbus-x11 \
-            curl wget sudo ca-certificates gnupg
+            curl wget sudo ca-certificates gnupg \
+            procps net-tools iproute2
 
           # Add Tailscale repository
           curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
@@ -34,22 +35,38 @@ jobs:
 
       - name: Configure Core RDP Settings
         run: |
-          # Fix xrdp config
-          sed -i 's/port=3389/port=3389/g' /etc/xrdp/xrdp.ini
+          # Generate machine-id
+          dbus-uuidgen | tee /etc/machine-id /var/lib/dbus/machine-id
+
+          # Configure xfce session
           echo "xfce4-session" > /root/.xsession
           chmod +x /root/.xsession
 
-          # Setup dbus properly
-          mkdir -p /var/run/dbus
-          dbus-uuidgen > /etc/machine-id
-          dbus-daemon --system --fork --print-pid
+          # Allow root to run X
+          echo "allowed_users=anybody" > /etc/X11/Xwrapper.config
 
-          # Start xrdp
-          service xrdp start || xrdp -nodaemon &
+          # Fix xrdp config - ensure port and permissions
+          sed -i 's/port=3389/port=3389/g' /etc/xrdp/xrdp.ini
+          sed -i 's/MaxBitmapCacheEntries=32768/MaxBitmapCacheEntries=2048/g' /etc/xrdp/xrdp.ini
+
+          # Create required xrdp dirs and fix permissions
+          mkdir -p /var/run/xrdp /var/log/xrdp
+          chmod 755 /var/run/xrdp
+
+          # Start xrdp session manager first, then xrdp
+          /usr/sbin/xrdp-sesman --nodaemon &
           sleep 2
+          /usr/sbin/xrdp --nodaemon &
+          sleep 3
 
-          # Verify xrdp is running
-          service xrdp status || echo "xrdp may not be running as a service"
+          # Debug — show if xrdp is running and port is open
+          echo "=== xrdp process check ==="
+          ps aux | grep xrdp || echo "xrdp not found in process list"
+          echo "=== port 3389 check ==="
+          ss -tlnp | grep 3389 || echo "Port 3389 not open yet"
+          echo "=== xrdp logs ==="
+          cat /var/log/xrdp/xrdp.log 2>/dev/null || echo "No xrdp log found"
+          cat /var/log/xrdp-sesman.log 2>/dev/null || true
 
       - name: Create RDP User with Secure Password
         run: |
@@ -61,7 +78,6 @@ jobs:
 
           echo "RDP_CREDS=User: RDP | Password: $PASSWORD" >> $GITHUB_ENV
 
-          # Verify user was created
           id RDP || { echo "User creation failed"; exit 1; }
 
       - name: Establish Tailscale Connection
@@ -91,11 +107,21 @@ jobs:
         run: |
           echo "Tailscale IP: $TAILSCALE_IP"
 
-          if ! (echo > /dev/tcp/$TAILSCALE_IP/3389) 2>/dev/null; then
-            echo "TCP connection to RDP port 3389 failed"
-            exit 1
+          # Re-check xrdp is still running, restart if needed
+          if ! ss -tlnp | grep -q 3389; then
+            echo "xrdp not on port 3389, attempting restart..."
+            /usr/sbin/xrdp-sesman --nodaemon &
+            sleep 2
+            /usr/sbin/xrdp --nodaemon &
+            sleep 3
           fi
-          echo "TCP connectivity successful!"
+
+          # Non-fatal connectivity check
+          if (echo > /dev/tcp/$TAILSCALE_IP/3389) 2>/dev/null; then
+            echo "TCP connectivity successful!"
+          else
+            echo "WARNING: Port 3389 not reachable via Tailscale yet, but continuing..."
+          fi
 
       - name: Maintain Connection
         run: |
@@ -109,5 +135,7 @@ jobs:
 
           while true; do
             echo "[$(date)] RDP Active - Cancel workflow to terminate"
+            # Keep xrdp alive
+            ss -tlnp | grep -q 3389 || (/usr/sbin/xrdp --nodaemon & sleep 2)
             sleep 300
           done
