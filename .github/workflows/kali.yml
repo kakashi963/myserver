@@ -1,4 +1,4 @@
-name: RDP
+name: Kali
 
 on:
   workflow_dispatch:
@@ -23,29 +23,24 @@ jobs:
 
       - name: Configure Core RDP Settings
         run: |
-          # Enable and start xrdp on port 3389
           sed -i 's/port=3389/port=3389/g' /etc/xrdp/xrdp.ini
           echo "xfce4-session" > /root/.xsession
           chmod +x /root/.xsession
 
-          # Start dbus and xrdp services
           mkdir -p /var/run/dbus
           dbus-daemon --system --fork
           service xrdp start
 
       - name: Create RDP User with Secure Password
         run: |
-          # Generate a random secure password
           PASSWORD=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 16)
 
-          # Create user and set password
           useradd -m -s /bin/bash RDP
           echo "RDP:$PASSWORD" | chpasswd
           usermod -aG sudo RDP
 
           echo "RDP_CREDS=User: RDP | Password: $PASSWORD" >> $GITHUB_ENV
 
-          # Verify user was created
           if ! id "RDP" &>/dev/null; then
             echo "User creation failed"
             exit 1
@@ -57,15 +52,12 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
-          # Start Tailscale daemon
           tailscaled --state=/tmp/tailscaled.state &
           sleep 3
 
-          # Bring up Tailscale with auth key and unique hostname
           tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
                        --hostname=gh-runner-$GITHUB_RUN_ID
 
-          # Wait for Tailscale IP assignment
           TS_IP=""
           RETRIES=0
           while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
@@ -85,7 +77,6 @@ jobs:
         run: |
           echo "Tailscale IP: $TAILSCALE_IP"
 
-          # Test TCP connectivity to port 3389
           if ! (echo > /dev/tcp/$TAILSCALE_IP/3389) 2>/dev/null; then
             echo "TCP connection to RDP port 3389 failed"
             exit 1
@@ -102,7 +93,6 @@ jobs:
           echo "=================="
           echo ""
 
-          # Keep runner active until manually cancelled
           while true; do
             echo "[$(date)] RDP Active - Cancel workflow to terminate"
             sleep 300
