@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  secure-access:
     runs-on: ubuntu-latest
     timeout-minutes: 3600
     container:
@@ -12,216 +12,101 @@ jobs:
       options: --privileged
 
     steps:
-      - name: Install Dependencies
+      - name: Install All Dependencies
         run: |
           export DEBIAN_FRONTEND=noninteractive
-
-          # Step 1: Use HTTP only (no SSL needed yet)
-          echo "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" > /etc/apt/sources.list
-
-          # Retry apt update up to 3 times
-          for i in 1 2 3; do
-            apt-get update -y && break || sleep 10
-          done
-
-          # Step 2: Install SSL certs + curl first
-          apt-get install -y --fix-missing ca-certificates curl gnupg wget
-
-          # Step 3: Switch to HTTPS now that certs are available
           echo "deb https://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" > /etc/apt/sources.list
 
-          for i in 1 2 3; do
-            apt-get update -y && break || sleep 10
-          done
+          apt-get update -yqq
+          apt-get install -y ca-certificates curl gnupg
 
-          # Step 4: Install desktop + tools with retry and --fix-missing
-          for i in 1 2 3; do
-            apt-get install -y --fix-missing \
-              kali-desktop-xfce \
-              kali-themes kali-menu \
-              xrdp xorgxrdp \
-              dbus dbus-x11 \
-              sudo procps net-tools iproute2 \
-              kali-linux-default && break || sleep 15
-          done
+          # Tailscale repo
+          curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg
+          curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list
 
-          echo "✅ All dependencies installed"
+          apt-get update -yqq
+          apt-get install -yqq tailscale openssh-server kali-desktop-xfce xrdp xorgxrdp dbus sudo procps net-tools kali-linux-default
 
-      - name: Install and Enable SSH Server
+          echo "✅ Installed: Tailscale + SSH + RDP"
+
+      - name: Connect Tailscale FIRST
         run: |
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y openssh-server
-
-          # Enable root login (generate secure password)
-          SSH_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 16)
-          echo "root:$SSH_PASS" | chpasswd
-
-          # Config changes
-          sed -i 's/#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-
-          mkdir -p /var/run/sshd
-          service ssh start || /usr/sbin/sshd -D &
-          sleep 3
-
-          # Verify
-          if ss -tlnp | grep -q :22; then
-            echo "✅ SSH listening on port 22"
-            echo "SSH_PASSWORD=$SSH_PASS" >> $GITHUB_ENV
-          else
-            echo "⚠️ SSH failed to start"
-            ps aux | grep sshd
-            exit 1
-          fi
-
-      - name: Configure Core RDP Settings
-        run: |
-          # Generate machine-id (required even if dbus-daemon not started)
-          dbus-uuidgen | tee /etc/machine-id /var/lib/dbus/machine-id || true
-
-          # Allow root and any user to start X sessions
-          echo "allowed_users=anybody" > /etc/X11/Xwrapper.config
-          echo "needs_root_rights=yes" >> /etc/X11/Xwrapper.config
-
-          # Set XFCE session for root
-          cat > /root/.xsession << 'EOF'
-          export XDG_SESSION_TYPE=x11
-          export XDG_CONFIG_DIRS=/etc/xdg
-          export XDG_DATA_DIRS=/usr/share/xfce4:/usr/share/xfce4/panel/plugins:/usr/share
-          unset DBUS_SESSION_BUS_ADDRESS
-          startxfce4
-          EOF
-          chmod +x /root/.xsession
-
-          # Fix xrdp config
-          sed -i 's/port=3389/port=3389/g' /etc/xrdp/xrdp.ini
-          sed -i 's/use_vsock=true/use_vsock=false/g' /etc/xrdp/xrdp.ini || true
-          sed -i 's/#.*xorg/xorg/' /etc/xrdp/xrdp.ini || true
-
-          # Polkit fix — allow any user to start sessions
-          mkdir -p /etc/polkit-1/localauthority/50-local.d/
-          cat > /etc/polkit-1/localauthority/50-local.d/allow-all.pkla << 'EOF'
-          [Allow all users]
-          Identity=unix-user:*
-          Action=*
-          ResultAny=yes
-          ResultInactive=yes
-          ResultActive=yes
-          EOF
-
-          # Create required dirs
-          mkdir -p /var/run/xrdp /var/log/xrdp /var/run/dbus
-          chmod 755 /var/run/xrdp
-
-          # Start xrdp
-          /usr/sbin/xrdp-sesman --nodaemon &
-          sleep 2
-          /usr/sbin/xrdp --nodaemon &
-          sleep 3
-
-          # Verify
-          if ss -tlnp | grep -q 3389; then
-            echo "✅ xrdp listening on port 3389"
-          else
-            echo "⚠️ xrdp issue:"
-            cat /var/log/xrdp/xrdp.log 2>/dev/null || true
-            ps aux | grep xrdp
-          fi
-
-      - name: Create RDP User
-        run: |
-          RDP_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 16)
-          userdel -r RDP 2>/dev/null || true
-          useradd -m -s /bin/bash RDP
-          echo "RDP:$RDP_PASS" | chpasswd
-          usermod -aG sudo RDP
-
-          cat > /home/RDP/.xsession << 'EOF'
-          export XDG_SESSION_TYPE=x11
-          export XDG_CONFIG_DIRS=/etc/xdg
-          unset DBUS_SESSION_BUS_ADDRESS
-          startxfce4
-          EOF
-          chmod +x /home/RDP/.xsession
-          chown RDP:RDP /home/RDP/.xsession
-
-          echo "RDP_PASSWORD=$RDP_PASS" >> $GITHUB_ENV
-          echo "✅ RDP user ready"
-
-      - name: Establish Tailscale Connection
-        run: |
-          tailscaled --state=/tmp/tailscaled.state --tun=userspace-networking &
+          tailscaled --state=/tmp/tailscaled.state --tun=userspace-networking --port=41641 &
           sleep 5
 
           tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=gh-kali-runner-$GITHUB_RUN_ID \
+            --hostname=gh-kali-${{ github.run_id }} \
             --accept-routes \
             --ssh
 
           TS_IP=$(tailscale ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          echo "✅ Tailscale ready: $TS_IP"
+          echo "✅ Tailscale: $TS_IP (SSH enabled)"
 
-      - name: Verify Services
+      - name: Setup SSH Server
+        run: |
+          SSH_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 16)
+          echo "root:$SSH_PASS" | chpasswd
+
+          sed -i 's/#*PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sed -i 's/#*PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+          mkdir -p /var/run/sshd
+          /usr/sbin/sshd -D -f /etc/ssh/sshd_config &
+          sleep 3
+
+          if ss -tlnp | grep -q :22; then
+            echo "✅ SSH ready on $TAILSCALE_IP:22"
+            echo "SSH_PASSWORD=$SSH_PASS" >> $GITHUB_ENV
+          fi
+
+      - name: Setup RDP + User
+        run: |
+          # XFCE config
+          cat > /root/.xsession << 'EOF'
+          startxfce4
+          EOF
+          chmod +x /root/.xsession
+
+          # xrdp config
+          sed -i 's/use_vsock=true/use_vsock=false/' /etc/xrdp/xrdp.ini || true
+          mkdir -p /var/run/xrdp; /usr/sbin/xrdp-sesman --nodaemon & sleep 2; /usr/sbin/xrdp --nodaemon &
+
+          # RDP user
+          RDP_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 16)
+          useradd -m -s /bin/bash RDP; echo "RDP:$RDP_PASS" | chpasswd; usermod -aG sudo RDP
+          cp /root/.xsession /home/RDP/; chmod +x /home/RDP/.xsession; chown RDP /home/RDP/.xsession
+
+          echo "RDP_PASSWORD=$RDP_PASS" >> $GITHUB_ENV
+          sleep 3; ss -tlnp | grep 3389 && echo "✅ RDP ready"
+
+      - name: Test Ports
         run: |
           TS_IP=$TAILSCALE_IP
-          echo "Testing services on $TS_IP..."
+          nc -zv $TS_IP 22 && echo "✅ SSH confirmed"
+          nc -zv $TS_IP 3389 && echo "✅ RDP confirmed" || echo "RDP warming up..."
 
-          # SSH test
-          if timeout 5 nc -zv $TS_IP 22; then
-            echo "✅ SSH port 22 open"
-          else
-            echo "⚠️ SSH port 22 not reachable yet"
-          fi
-
-          # RDP test
-          if timeout 5 nc -zv $TS_IP 3389; then
-            echo "✅ RDP port 3389 open"
-          else
-            echo "⚠️ RDP port 3389 not reachable yet"
-          fi
-
-      - name: Print Access Info
+      - name: ACCESS INFO
         run: |
-          echo "==================================="
-          echo "🎯 KALI ACCESS DETAILS"
-          echo "==================================="
-          echo "🌐 Tailscale IP: $TAILSCALE_IP"
-          echo ""
-          echo "🔐 SSH:"
-          echo "  ssh root@$TAILSCALE_IP"
-          echo "  Password: $SSH_PASSWORD"
-          echo ""
-          echo "🖥️ RDP:"
-          echo "  User: RDP"
-          echo "  Pass: $RDP_PASSWORD"
-          echo "  mstsc /v:$TAILSCALE_IP"
-          echo ""
-          echo "⚠️ Cancel workflow to stop session"
-          echo "==================================="
+          cat << EOF
+=======================================
+🌐 IP: $TAILSCALE_IP
 
-      - name: Keep Alive
+🔐 SSH: ssh root@$TAILSCALE_IP
+     Pass: $SSH_PASSWORD
+
+🖥️ RDP: mstsc /v:$TAILSCALE_IP
+     User: RDP | Pass: $RDP_PASSWORD
+
+Cancel job to stop
+=======================================
+EOF
+
+      - name: Keep Services Alive
         run: |
           while true; do
-            echo "[$(date)] Services check..."
-            
-            # Restart SSH if dead
-            if ! ss -tlnp | grep -q :22; then
-              echo "Restarting SSH..."
-              service ssh restart || /usr/sbin/sshd -D &
-            fi
-            
-            # Restart xrdp if dead
-            if ! ss -tlnp | grep -q :3389; then
-              echo "Restarting xrdp..."
-              pkill xrdp || true
-              sleep 1
-              /usr/sbin/xrdp-sesman --nodaemon &
-              sleep 2
-              /usr/sbin/xrdp --nodaemon &
-            fi
-            
-            sleep 60
+            pgrep sshd || { echo "Restart SSH"; /usr/sbin/sshd -D &; }
+            pgrep xrdp || { echo "Restart RDP"; /usr/sbin/xrdp-sesman --nodaemon & sleep 1; /usr/sbin/xrdp --nodaemon &; }
+            sleep 30
           done
