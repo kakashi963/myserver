@@ -16,9 +16,12 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
-          apt-get install -y --no-install-recommends \
-            xfce4 xfce4-terminal \
-            xrdp xorgxrdp \
+
+          # Install Kali GNOME desktop with full toolset
+          apt-get install -y \
+            kali-desktop-gnome \
+            kali-linux-default \
+            xrdp \
             dbus dbus-x11 \
             curl wget sudo ca-certificates gnupg \
             procps net-tools iproute2
@@ -38,35 +41,34 @@ jobs:
           # Generate machine-id
           dbus-uuidgen | tee /etc/machine-id /var/lib/dbus/machine-id
 
-          # Configure xfce session
-          echo "xfce4-session" > /root/.xsession
-          chmod +x /root/.xsession
-
           # Allow root to run X
           echo "allowed_users=anybody" > /etc/X11/Xwrapper.config
 
-          # Fix xrdp config - ensure port and permissions
-          sed -i 's/port=3389/port=3389/g' /etc/xrdp/xrdp.ini
-          sed -i 's/MaxBitmapCacheEntries=32768/MaxBitmapCacheEntries=2048/g' /etc/xrdp/xrdp.ini
+          # Set GNOME session for RDP
+          echo "export XDG_SESSION_TYPE=x11" > /root/.xsession
+          echo "export GNOME_SHELL_SESSION_MODE=kali" >> /root/.xsession
+          echo "exec gnome-session" >> /root/.xsession
+          chmod +x /root/.xsession
 
-          # Create required xrdp dirs and fix permissions
+          # Fix xrdp config
+          sed -i 's/port=3389/port=3389/g' /etc/xrdp/xrdp.ini
+          # Use Xorg backend for better GNOME compatibility
+          sed -i 's/use_vsock=true/use_vsock=false/g' /etc/xrdp/xrdp.ini
+
+          # Create required xrdp dirs
           mkdir -p /var/run/xrdp /var/log/xrdp
           chmod 755 /var/run/xrdp
 
-          # Start xrdp session manager first, then xrdp
+          # Start xrdp
           /usr/sbin/xrdp-sesman --nodaemon &
           sleep 2
           /usr/sbin/xrdp --nodaemon &
           sleep 3
 
-          # Debug — show if xrdp is running and port is open
           echo "=== xrdp process check ==="
-          ps aux | grep xrdp || echo "xrdp not found in process list"
+          ps aux | grep xrdp
           echo "=== port 3389 check ==="
           ss -tlnp | grep 3389 || echo "Port 3389 not open yet"
-          echo "=== xrdp logs ==="
-          cat /var/log/xrdp/xrdp.log 2>/dev/null || echo "No xrdp log found"
-          cat /var/log/xrdp-sesman.log 2>/dev/null || true
 
       - name: Create RDP User with Secure Password
         run: |
@@ -75,6 +77,12 @@ jobs:
           useradd -m -s /bin/bash RDP
           echo "RDP:$PASSWORD" | chpasswd
           usermod -aG sudo RDP
+
+          # Set GNOME session for RDP user
+          echo "export XDG_SESSION_TYPE=x11" > /home/RDP/.xsession
+          echo "exec gnome-session" >> /home/RDP/.xsession
+          chmod +x /home/RDP/.xsession
+          chown RDP:RDP /home/RDP/.xsession
 
           echo "RDP_CREDS=User: RDP | Password: $PASSWORD" >> $GITHUB_ENV
 
@@ -107,7 +115,6 @@ jobs:
         run: |
           echo "Tailscale IP: $TAILSCALE_IP"
 
-          # Re-check xrdp is still running, restart if needed
           if ! ss -tlnp | grep -q 3389; then
             echo "xrdp not on port 3389, attempting restart..."
             /usr/sbin/xrdp-sesman --nodaemon &
@@ -116,11 +123,10 @@ jobs:
             sleep 3
           fi
 
-          # Non-fatal connectivity check
           if (echo > /dev/tcp/$TAILSCALE_IP/3389) 2>/dev/null; then
             echo "TCP connectivity successful!"
           else
-            echo "WARNING: Port 3389 not reachable via Tailscale yet, but continuing..."
+            echo "WARNING: Port 3389 not reachable via Tailscale yet, continuing..."
           fi
 
       - name: Maintain Connection
@@ -135,7 +141,6 @@ jobs:
 
           while true; do
             echo "[$(date)] RDP Active - Cancel workflow to terminate"
-            # Keep xrdp alive
             ss -tlnp | grep -q 3389 || (/usr/sbin/xrdp --nodaemon & sleep 2)
             sleep 300
           done
