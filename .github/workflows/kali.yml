@@ -6,7 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: ubuntu-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360  # GitHub Actions max is 6 hours (360 min)
     container:
       image: kalilinux/kali-rolling
       options: --privileged
@@ -63,26 +63,36 @@ jobs:
           done
 
           echo "✅ All dependencies installed"
-                - name: Install and Enable SSH Server
+
+      - name: Install and Enable SSH Server
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update
           apt-get install -y openssh-server
-          # Enable root login and restart
-          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sed -i 's/PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-          echo 'root:changeme123' | chpasswd  # Or generate random pw
-          mkdir -p /var/run/sshd
-          systemctl enable ssh || service ssh start || /usr/sbin/sshd -D &
-          sleep 2
-          # Verify
-          ss -tlnp | grep :22 && echo "✅ SSH on port 22"
 
-          
+          # Generate a random secure root password
+          ROOT_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 20)
+          echo "root:$ROOT_PASS" | chpasswd
+          echo "ROOT_SSH_PASS=$ROOT_PASS" >> $GITHUB_ENV
+
+          # Enable root login via SSH
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+          mkdir -p /var/run/sshd
+          /usr/sbin/sshd -D &
+          sleep 2
+
+          # Verify SSH is listening
+          if ss -tlnp | grep -q ':22'; then
+            echo "✅ SSH listening on port 22"
+          else
+            echo "❌ SSH failed to start"
+            exit 1
+          fi
 
       - name: Configure Core RDP Settings
         run: |
-          # Generate machine-id (required even if dbus-daemon not started)
+          # Generate machine-id
           dbus-uuidgen | tee /etc/machine-id /var/lib/dbus/machine-id || true
 
           # Allow root and any user to start X sessions
@@ -100,10 +110,7 @@ jobs:
           chmod +x /root/.xsession
 
           # Fix xrdp config
-          sed -i 's/port=3389/port=3389/g' /etc/xrdp/xrdp.ini
           sed -i 's/use_vsock=true/use_vsock=false/g' /etc/xrdp/xrdp.ini || true
-          # Make sure xrdp uses Xorg backend
-          sed -i 's/#.*xorg/xorg/' /etc/xrdp/xrdp.ini || true
 
           # Polkit fix — allow any user to start sessions (needed in containers)
           mkdir -p /etc/polkit-1/localauthority/50-local.d/
@@ -157,9 +164,9 @@ jobs:
           chmod +x /home/RDP/.xsession
           chown RDP:RDP /home/RDP/.xsession
 
-          echo "RDP_CREDS=User: RDP | Password: $PASSWORD" >> $GITHUB_ENV
+          echo "RDP_PASSWORD=$PASSWORD" >> $GITHUB_ENV
 
-          id RDP || { echo "User creation failed"; exit 1; }
+          id RDP || { echo "❌ User creation failed"; exit 1; }
           echo "✅ RDP user created successfully"
 
       - name: Establish Tailscale Connection
@@ -170,11 +177,10 @@ jobs:
 
           # Connect with auth key
           tailscale up \
-          --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-           --hostname=gh-runner-$GITHUB_RUN_ID \
-           --accept-routes \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=gh-runner-$GITHUB_RUN_ID \
+            --accept-routes \
             --ssh
-
 
           # Wait for IP with retries
           TS_IP=""
@@ -209,14 +215,18 @@ jobs:
             sleep 3
           fi
 
-          # Final port check (non-fatal)
+          # Final port checks
           if (echo > /dev/tcp/$TAILSCALE_IP/3389) 2>/dev/null; then
             echo "✅ TCP port 3389 reachable via Tailscale!"
           else
-            echo "⚠️ Port 3389 not reachable via Tailscale yet — may still work after a few seconds"
+            echo "⚠️ Port 3389 not yet reachable — may work after a few seconds"
           fi
-          tailscale ip -4 | xargs -I {} nc -zv {} 22 && echo "✅ SSH port open via Tailscale"
 
+          if nc -zv $TAILSCALE_IP 22 2>/dev/null; then
+            echo "✅ SSH port 22 open via Tailscale"
+          else
+            echo "⚠️ SSH port 22 not reachable yet"
+          fi
 
       - name: Maintain Connection
         run: |
@@ -224,12 +234,15 @@ jobs:
           echo "======================================="
           echo "           KALI RDP ACCESS             "
           echo "======================================="
-          echo "  Address  : $TAILSCALE_IP"
-          echo "  Username : RDP"
-          echo "  Password : $RDP_CREDS"
+          echo "  Tailscale IP : $TAILSCALE_IP"
+          echo "  RDP Username : RDP"
+          echo "  RDP Password : $RDP_PASSWORD"
+          echo "  SSH Root Pass: $ROOT_SSH_PASS"
+          echo "======================================="
+          echo "  Connect via  : mstsc / Remmina"
+          echo "  Address      : $TAILSCALE_IP:3389"
           echo "======================================="
           echo ""
-          echo "Connect using Windows RDP (mstsc) or Remmina"
           echo "Cancel this workflow run to terminate the session"
           echo ""
 
