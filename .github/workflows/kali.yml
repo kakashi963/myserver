@@ -19,7 +19,8 @@ jobs:
           apt-get install -y --no-install-recommends \
             xfce4 xfce4-terminal \
             xrdp xorgxrdp \
-            dbus-x11 curl wget sudo ca-certificates gnupg
+            dbus dbus-x11 \
+            curl wget sudo ca-certificates gnupg
 
           # Add Tailscale repository
           curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
@@ -33,13 +34,22 @@ jobs:
 
       - name: Configure Core RDP Settings
         run: |
+          # Fix xrdp config
           sed -i 's/port=3389/port=3389/g' /etc/xrdp/xrdp.ini
           echo "xfce4-session" > /root/.xsession
           chmod +x /root/.xsession
 
+          # Setup dbus properly
           mkdir -p /var/run/dbus
-          dbus-daemon --system --fork
-          service xrdp start
+          dbus-uuidgen > /etc/machine-id
+          dbus-daemon --system --fork --print-pid
+
+          # Start xrdp
+          service xrdp start || xrdp -nodaemon &
+          sleep 2
+
+          # Verify xrdp is running
+          service xrdp status || echo "xrdp may not be running as a service"
 
       - name: Create RDP User with Secure Password
         run: |
