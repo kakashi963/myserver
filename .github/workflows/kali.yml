@@ -110,3 +110,4 @@ EOF
             pgrep xrdp || { echo "Restart RDP"; /usr/sbin/xrdp-sesman --nodaemon & sleep 1; /usr/sbin/xrdp --nodaemon &; }
             sleep 30
           done
+
