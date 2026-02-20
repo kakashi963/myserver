@@ -17,8 +17,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
 
           # Step 1: Use HTTP only (no SSL needed yet)
-          echo "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
-            > /etc/apt/sources.list
+          echo "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" > /etc/apt/sources.list
 
           # Retry apt update up to 3 times
           for i in 1 2 3; do
@@ -29,8 +28,7 @@ jobs:
           apt-get install -y --fix-missing ca-certificates curl gnupg wget
 
           # Step 3: Switch to HTTPS now that certs are available
-          echo "deb https://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
-            > /etc/apt/sources.list
+          echo "deb https://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" > /etc/apt/sources.list
 
           for i in 1 2 3; do
             apt-get update -y && break || sleep 10
@@ -47,22 +45,35 @@ jobs:
               kali-linux-default && break || sleep 15
           done
 
-          # Step 5: Add Tailscale repo and install
-          curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
-            | tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
-
-          curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list \
-            | tee /etc/apt/sources.list.d/tailscale.list
-
-          for i in 1 2 3; do
-            apt-get update -y && break || sleep 10
-          done
-
-          for i in 1 2 3; do
-            apt-get install -y tailscale && break || sleep 10
-          done
-
           echo "✅ All dependencies installed"
+
+      - name: Install and Enable SSH Server
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y openssh-server
+
+          # Enable root login (generate secure password)
+          SSH_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 16)
+          echo "root:$SSH_PASS" | chpasswd
+
+          # Config changes
+          sed -i 's/#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+          mkdir -p /var/run/sshd
+          service ssh start || /usr/sbin/sshd -D &
+          sleep 3
+
+          # Verify
+          if ss -tlnp | grep -q :22; then
+            echo "✅ SSH listening on port 22"
+            echo "SSH_PASSWORD=$SSH_PASS" >> $GITHUB_ENV
+          else
+            echo "⚠️ SSH failed to start"
+            ps aux | grep sshd
+            exit 1
+          fi
 
       - name: Configure Core RDP Settings
         run: |
@@ -86,10 +97,9 @@ jobs:
           # Fix xrdp config
           sed -i 's/port=3389/port=3389/g' /etc/xrdp/xrdp.ini
           sed -i 's/use_vsock=true/use_vsock=false/g' /etc/xrdp/xrdp.ini || true
-          # Make sure xrdp uses Xorg backend
           sed -i 's/#.*xorg/xorg/' /etc/xrdp/xrdp.ini || true
 
-          # Polkit fix — allow any user to start sessions (needed in containers)
+          # Polkit fix — allow any user to start sessions
           mkdir -p /etc/polkit-1/localauthority/50-local.d/
           cat > /etc/polkit-1/localauthority/50-local.d/allow-all.pkla << 'EOF'
           [Allow all users]
@@ -112,26 +122,21 @@ jobs:
 
           # Verify
           if ss -tlnp | grep -q 3389; then
-            echo "✅ xrdp is listening on port 3389"
+            echo "✅ xrdp listening on port 3389"
           else
-            echo "⚠️ xrdp not on 3389, checking logs..."
+            echo "⚠️ xrdp issue:"
             cat /var/log/xrdp/xrdp.log 2>/dev/null || true
-            cat /var/log/xrdp-sesman.log 2>/dev/null || true
             ps aux | grep xrdp
           fi
 
-      - name: Create RDP User with Secure Password
+      - name: Create RDP User
         run: |
-          PASSWORD=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 16)
-
-          # Remove user if already exists (re-run safety)
+          RDP_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 16)
           userdel -r RDP 2>/dev/null || true
-
           useradd -m -s /bin/bash RDP
-          echo "RDP:$PASSWORD" | chpasswd
+          echo "RDP:$RDP_PASS" | chpasswd
           usermod -aG sudo RDP
 
-          # Set XFCE session for RDP user
           cat > /home/RDP/.xsession << 'EOF'
           export XDG_SESSION_TYPE=x11
           export XDG_CONFIG_DIRS=/etc/xdg
@@ -141,87 +146,82 @@ jobs:
           chmod +x /home/RDP/.xsession
           chown RDP:RDP /home/RDP/.xsession
 
-          echo "RDP_CREDS=User: RDP | Password: $PASSWORD" >> $GITHUB_ENV
-
-          id RDP || { echo "User creation failed"; exit 1; }
-          echo "✅ RDP user created successfully"
+          echo "RDP_PASSWORD=$RDP_PASS" >> $GITHUB_ENV
+          echo "✅ RDP user ready"
 
       - name: Establish Tailscale Connection
         run: |
-          # Start tailscaled daemon
           tailscaled --state=/tmp/tailscaled.state --tun=userspace-networking &
           sleep 5
 
-          # Connect with auth key
           tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=gh-runner-$GITHUB_RUN_ID \
-            --accept-routes
+            --hostname=gh-kali-runner-$GITHUB_RUN_ID \
+            --accept-routes \
+            --ssh
 
-          # Wait for IP with retries
-          TS_IP=""
-          RETRIES=0
-          while [ -z "$TS_IP" ] && [ $RETRIES -lt 20 ]; do
-            TS_IP=$(tailscale ip -4 2>/dev/null || true)
-            if [ -z "$TS_IP" ]; then
-              echo "Waiting for Tailscale IP... ($RETRIES/20)"
-              sleep 5
-            fi
-            RETRIES=$((RETRIES + 1))
-          done
-
-          if [ -z "$TS_IP" ]; then
-            echo "❌ Tailscale IP not assigned after retries. Exiting."
-            exit 1
-          fi
-
-          echo "✅ Tailscale IP: $TS_IP"
+          TS_IP=$(tailscale ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          echo "✅ Tailscale ready: $TS_IP"
 
-      - name: Verify and Fix RDP
+      - name: Verify Services
         run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
+          TS_IP=$TAILSCALE_IP
+          echo "Testing services on $TS_IP..."
 
-          # If xrdp died, restart it
-          if ! ss -tlnp | grep -q 3389; then
-            echo "xrdp not running, restarting..."
-            /usr/sbin/xrdp-sesman --nodaemon &
-            sleep 2
-            /usr/sbin/xrdp --nodaemon &
-            sleep 3
-          fi
-
-          # Final port check (non-fatal)
-          if (echo > /dev/tcp/$TAILSCALE_IP/3389) 2>/dev/null; then
-            echo "✅ TCP port 3389 reachable via Tailscale!"
+          # SSH test
+          if timeout 5 nc -zv $TS_IP 22; then
+            echo "✅ SSH port 22 open"
           else
-            echo "⚠️ Port 3389 not reachable via Tailscale yet — may still work after a few seconds"
+            echo "⚠️ SSH port 22 not reachable yet"
           fi
 
-      - name: Maintain Connection
-        run: |
-          echo ""
-          echo "======================================="
-          echo "           KALI RDP ACCESS             "
-          echo "======================================="
-          echo "  Address  : $TAILSCALE_IP"
-          echo "  Username : RDP"
-          echo "  Password : $RDP_CREDS"
-          echo "======================================="
-          echo ""
-          echo "Connect using Windows RDP (mstsc) or Remmina"
-          echo "Cancel this workflow run to terminate the session"
-          echo ""
+          # RDP test
+          if timeout 5 nc -zv $TS_IP 3389; then
+            echo "✅ RDP port 3389 open"
+          else
+            echo "⚠️ RDP port 3389 not reachable yet"
+          fi
 
-          # Keep alive + auto-restart xrdp if it dies
+      - name: Print Access Info
+        run: |
+          echo "==================================="
+          echo "🎯 KALI ACCESS DETAILS"
+          echo "==================================="
+          echo "🌐 Tailscale IP: $TAILSCALE_IP"
+          echo ""
+          echo "🔐 SSH:"
+          echo "  ssh root@$TAILSCALE_IP"
+          echo "  Password: $SSH_PASSWORD"
+          echo ""
+          echo "🖥️ RDP:"
+          echo "  User: RDP"
+          echo "  Pass: $RDP_PASSWORD"
+          echo "  mstsc /v:$TAILSCALE_IP"
+          echo ""
+          echo "⚠️ Cancel workflow to stop session"
+          echo "==================================="
+
+      - name: Keep Alive
+        run: |
           while true; do
-            echo "[$(date)] ✅ Session active — $TAILSCALE_IP:3389"
-            if ! ss -tlnp | grep -q 3389; then
-              echo "⚠️ xrdp died, restarting..."
+            echo "[$(date)] Services check..."
+            
+            # Restart SSH if dead
+            if ! ss -tlnp | grep -q :22; then
+              echo "Restarting SSH..."
+              service ssh restart || /usr/sbin/sshd -D &
+            fi
+            
+            # Restart xrdp if dead
+            if ! ss -tlnp | grep -q :3389; then
+              echo "Restarting xrdp..."
+              pkill xrdp || true
+              sleep 1
               /usr/sbin/xrdp-sesman --nodaemon &
               sleep 2
               /usr/sbin/xrdp --nodaemon &
-              sleep 2
             fi
-            sleep 300
+            
+            sleep 60
           done
