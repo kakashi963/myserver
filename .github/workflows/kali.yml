@@ -15,10 +15,15 @@ jobs:
       - name: Install Dependencies
         run: |
           export DEBIAN_FRONTEND=noninteractive
+
+          # Force apt to use only the main Kali mirror — avoid broken mirrors
+          echo "deb https://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
+            > /etc/apt/sources.list
+
           apt-get update -y
 
-          # XFCE works best with xrdp — install full Kali XFCE with themes
-          apt-get install -y \
+          # Install with --fix-missing to skip any unreachable packages
+          apt-get install -y --fix-missing \
             kali-desktop-xfce \
             kali-linux-default \
             kali-themes kali-menu \
@@ -39,13 +44,10 @@ jobs:
 
       - name: Configure Core RDP Settings
         run: |
-          # Generate machine-id
           dbus-uuidgen | tee /etc/machine-id /var/lib/dbus/machine-id
 
-          # Allow root to run X
           echo "allowed_users=anybody" > /etc/X11/Xwrapper.config
 
-          # Set XFCE session properly for xrdp
           cat > /root/.xsession << 'EOF'
           export XDG_SESSION_TYPE=x11
           export XDG_CONFIG_DIRS=/etc/xdg
@@ -55,40 +57,11 @@ jobs:
           EOF
           chmod +x /root/.xsession
 
-          # Fix xrdp to use Xorg (most compatible)
-          cat > /etc/xrdp/xrdp.ini << 'EOF'
-          [globals]
-          bitmap_cache=yes
-          bitmap_compression=yes
-          port=3389
-          crypt_level=low
-          channel_code=1
-          max_bpp=24
-          use_vsock=false
+          sed -i 's/port=3389/port=3389/g' /etc/xrdp/xrdp.ini
 
-          [xrdp1]
-          name=sesman-Xvnc
-          lib=libvnc.so
-          username=ask
-          password=ask
-          ip=127.0.0.1
-          port=5900
-
-          [xrdp2]
-          name=Xorg
-          lib=libxup.so
-          username=ask
-          password=ask
-          ip=127.0.0.1
-          port=-1
-          code=20
-          EOF
-
-          # Create required dirs
           mkdir -p /var/run/xrdp /var/log/xrdp /var/run/dbus
           chmod 755 /var/run/xrdp
 
-          # Start xrdp services
           /usr/sbin/xrdp-sesman --nodaemon &
           sleep 2
           /usr/sbin/xrdp --nodaemon &
@@ -109,7 +82,6 @@ jobs:
           echo "RDP:$PASSWORD" | chpasswd
           usermod -aG sudo RDP
 
-          # Set XFCE session for RDP user
           cat > /home/RDP/.xsession << 'EOF'
           export XDG_SESSION_TYPE=x11
           export XDG_CONFIG_DIRS=/etc/xdg
