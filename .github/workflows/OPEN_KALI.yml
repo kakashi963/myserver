@@ -1,4 +1,4 @@
-name: Kali
+name: OPEN_KALI
 
 on:
   workflow_dispatch:
