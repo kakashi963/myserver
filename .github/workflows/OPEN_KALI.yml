@@ -16,21 +16,17 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
 
-          echo "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
-            > /etc/apt/sources.list
+          echo "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" > /etc/apt/sources.list
 
           for i in 1 2 3; do apt-get update -y && break || sleep 10; done
 
           apt-get install -y --fix-missing ca-certificates curl gnupg wget
 
-          echo "deb https://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
-            > /etc/apt/sources.list
+          echo "deb https://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" > /etc/apt/sources.list
 
           for i in 1 2 3; do apt-get update -y && break || sleep 10; done
 
           # Headless Kali + full toolset (no GUI)
-          # headless: no desktop; default: usual Kali tools
-          # you can also add kali-linux-everything but it's huge
           for i in 1 2 3; do
             apt-get install -y --fix-missing \
               kali-linux-headless \
@@ -113,86 +109,7 @@ jobs:
           echo ""
           tailscale status || true
 
-      - name: Install and Configure OpenClaw
-        env:
-          OC_NV_API_KEY: ${{ secrets.OPENCLAW_NV_API_KEY }}
-          OC_TG_TOKEN: ${{ secrets.OPENCLAW_TELEGRAM_BOT_TOKEN }}
-        run: |
-          set -e
-          export DEBIAN_FRONTEND=noninteractive
-
-          curl -fsSL https://openclaw.ai/install.sh | bash
-
-          mkdir -p /root/.openclaw
-
-          cat > /root/.openclaw/openclaw.json << 'EOF'
-          {
-            "agent": {
-              "workspace": "/root/.openclaw/workspace"
-            },
-            "gateway": {
-              "bind": "127.0.0.1",
-              "port": 18789,
-              "auth": {
-                "mode": "token",
-                "token": "AUTO_REPLACE_GATEWAY_TOKEN"
-              }
-            },
-            "providers": {
-              "custom-integrate-api-nvidia-com": {
-                "type": "openai-compatible",
-                "baseUrl": "https://integrate.api.nvidia.com/v1",
-                "apiKey": "AUTO_REPLACE_NV_API_KEY",
-                "models": {
-                  "qwen/qwen3-coder-480b-a35b-instruct": {
-                    "id": "qwen/qwen3-coder-480b-a35b-instruct",
-                    "alias": "qwen-coder"
-                  }
-                }
-              }
-            },
-            "agents": {
-              "default": {
-                "model": "custom-integrate-api-nvidia-com/qwen/qwen3-coder-480b-a35b-instruct"
-              }
-            },
-            "channels": {
-              "telegram": {
-                "enabled": true,
-                "botToken": "AUTO_REPLACE_TELEGRAM_BOT_TOKEN",
-                "dmPolicy": "pairing",
-                "allowFrom": ["*"]
-              }
-            },
-            "hooks": {
-              "boot-md": { "enabled": true },
-              "bootstrap-extra-files": { "enabled": true },
-              "command-logger": { "enabled": true },
-              "session-memory": { "enabled": true }
-            }
-          }
-          EOF
-
-          GATEWAY_TOKEN=$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 64)
-          sed -i "s/AUTO_REPLACE_NV_API_KEY/${OC_NV_API_KEY}/" /root/.openclaw/openclaw.json
-          sed -i "s/AUTO_REPLACE_TERMINOLOGY//" /root/.openclaw/openclaw.json || true
-          sed -i "s/AUTO_REPLACE_TELEGRAM_BOT_TOKEN/${OC_TG_TOKEN}/" /root/.openclaw/openclaw.json
-          sed -i "s/AUTO_REPLACE_GATEWAY_TOKEN/${GATEWAY_TOKEN}/" /root/.openclaw/openclaw.json
-
-          echo "OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}" >> $GITHUB_ENV
-
-          openclaw gateway start --daemon --config /root/.openclaw/openclaw.json
-
-          for i in $(seq 1 30); do
-            if openclaw health --json >/dev/null 2>&1; then
-              echo "✅ OpenClaw gateway is healthy on 127.0.0.1:18789"
-              break
-            fi
-            echo "Waiting for OpenClaw gateway... ($i/30)"
-            sleep 2
-          done
-
-      - name: Maintain Session (SSH + OpenClaw)
+      - name: Maintain Session (SSH Only)
         run: |
           echo ""
           echo "======================================="
@@ -203,15 +120,6 @@ jobs:
           echo "======================================="
           echo "  SSH Connect  : ssh root@$TAILSCALE_IP"
           echo "======================================="
-          echo ""
-          echo "=========== OPENCLAW DASHBOARD ==============="
-          echo "  Local URL   : http://127.0.0.1:18789/"
-          echo "  With token  : http://127.0.0.1:18789/#token=$OPENCLAW_GATEWAY_TOKEN"
-          echo "  From your PC:"
-          echo "    ssh -N -L 18789:127.0.0.1:18789 root@$TAILSCALE_IP"
-          echo "    then open: http://localhost:18789/"
-          echo "              http://localhost:18789/#token=$OPENCLAW_GATEWAY_TOKEN"
-          echo "=============================================="
           echo ""
           echo "Cancel this workflow run to terminate the session"
           echo ""
