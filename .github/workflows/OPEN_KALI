@@ -1,0 +1,326 @@
+name: Kali
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    container:
+      image: kalilinux/kali-rolling
+      options: --privileged
+
+    steps:
+      - name: Install Dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+
+          echo "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
+            > /etc/apt/sources.list
+
+          for i in 1 2 3; do apt-get update -y && break || sleep 10; done
+
+          apt-get install -y --fix-missing ca-certificates curl gnupg wget
+
+          echo "deb https://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
+            > /etc/apt/sources.list
+
+          for i in 1 2 3; do apt-get update -y && break || sleep 10; done
+
+          for i in 1 2 3; do
+            apt-get install -y --fix-missing \
+              kali-desktop-xfce kali-themes kali-menu \
+              xrdp xorgxrdp \
+              dbus dbus-x11 \
+              sudo procps net-tools iproute2 \
+              kali-linux-default && break || sleep 15
+          done
+
+          curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
+            | tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
+
+          curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list \
+            | tee /etc/apt/sources.list.d/tailscale.list
+
+          for i in 1 2 3; do apt-get update -y && break || sleep 10; done
+          for i in 1 2 3; do apt-get install -y tailscale && break || sleep 10; done
+
+          echo "✅ All dependencies installed"
+
+      - name: Install and Enable SSH Server
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get install -y openssh-server
+
+          ROOT_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 20)
+          echo "root:$ROOT_PASS" | chpasswd
+          echo "ROOT_SSH_PASS=$ROOT_PASS" >> $GITHUB_ENV
+
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+          mkdir -p /var/run/sshd
+          /usr/sbin/sshd -D &
+          sleep 2
+
+          if ss -tlnp | grep -q ':22'; then
+            echo "✅ SSH listening on port 22"
+          else
+            echo "❌ SSH failed to start"
+            exit 1
+          fi
+
+      - name: Configure Core RDP Settings
+        run: |
+          dbus-uuidgen | tee /etc/machine-id /var/lib/dbus/machine-id || true
+
+          echo "allowed_users=anybody" > /etc/X11/Xwrapper.config
+          echo "needs_root_rights=yes" >> /etc/X11/Xwrapper.config
+
+          cat > /root/.xsession << 'EOF'
+          export XDG_SESSION_TYPE=x11
+          export XDG_CONFIG_DIRS=/etc/xdg
+          export XDG_DATA_DIRS=/usr/share/xfce4:/usr/share/xfce4/panel/plugins:/usr/share
+          unset DBUS_SESSION_BUS_ADDRESS
+          startxfce4
+          EOF
+          chmod +x /root/.xsession
+
+          sed -i 's/use_vsock=true/use_vsock=false/g' /etc/xrdp/xrdp.ini || true
+          sed -i 's/^port=.*/port=tcp:\/\/:3389/' /etc/xrdp/xrdp.ini || \
+            echo "port=tcp://:3389" >> /etc/xrdp/xrdp.ini
+
+          mkdir -p /etc/polkit-1/localauthority/50-local.d/
+          cat > /etc/polkit-1/localauthority/50-local.d/allow-all.pkla << 'EOF'
+          [Allow all users]
+          Identity=unix-user:*
+          Action=*
+          ResultAny=yes
+          ResultInactive=yes
+          ResultActive=yes
+          EOF
+
+          mkdir -p /var/run/xrdp /var/log/xrdp /var/run/dbus
+          chmod 755 /var/run/xrdp
+
+          rm -f /var/run/xrdp/xrdp.pid /var/run/xrdp/xrdp-sesman.pid
+
+          /usr/sbin/xrdp-sesman --nodaemon &
+          sleep 2
+          /usr/sbin/xrdp --nodaemon &
+          sleep 3
+
+          if ss -tlnp | grep -q 3389; then
+            echo "✅ xrdp is listening on port 3389"
+          else
+            echo "⚠️ xrdp not on 3389, checking logs..."
+            cat /var/log/xrdp/xrdp.log 2>/dev/null || true
+            cat /var/log/xrdp-sesman.log 2>/dev/null || true
+            ps aux | grep xrdp
+            exit 1
+          fi
+
+      - name: Create RDP User with Secure Password
+        run: |
+          PASSWORD=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 16)
+
+          userdel -r RDP 2>/dev/null || true
+          useradd -m -s /bin/bash RDP
+          echo "RDP:$PASSWORD" | chpasswd
+          usermod -aG sudo RDP
+
+          cat > /home/RDP/.xsession << 'EOF'
+          export XDG_SESSION_TYPE=x11
+          export XDG_CONFIG_DIRS=/etc/xdg
+          unset DBUS_SESSION_BUS_ADDRESS
+          startxfce4
+          EOF
+          chmod +x /home/RDP/.xsession
+          chown RDP:RDP /home/RDP/.xsession
+
+          echo "RDP_PASSWORD=$PASSWORD" >> $GITHUB_ENV
+
+          id RDP || { echo "❌ User creation failed"; exit 1; }
+          echo "✅ RDP user created successfully"
+
+      - name: Establish Tailscale Connection
+        run: |
+          tailscaled --state=/tmp/tailscaled.state --tun=userspace-networking &
+          sleep 5
+
+          tailscale up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=gh-runner-$GITHUB_RUN_ID \
+            --accept-routes \
+            --accept-dns=false \
+            --ssh
+
+          TS_IP=""
+          RETRIES=0
+          while [ -z "$TS_IP" ] && [ $RETRIES -lt 20 ]; do
+            TS_IP=$(tailscale ip -4 2>/dev/null || true)
+            if [ -z "$TS_IP" ]; then
+              echo "Waiting for Tailscale IP... ($RETRIES/20)"
+              sleep 5
+            fi
+            RETRIES=$((RETRIES + 1))
+          done
+
+          if [ -z "$TS_IP" ]; then
+            echo "❌ Tailscale IP not assigned after retries. Exiting."
+            exit 1
+          fi
+
+          echo "✅ Tailscale IP: $TS_IP"
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Verify and Fix RDP
+        run: |
+          echo "Tailscale IP: $TAILSCALE_IP"
+
+          if ! ss -tlnp | grep -q 3389; then
+            echo "xrdp not running, restarting..."
+            rm -f /var/run/xrdp/xrdp.pid /var/run/xrdp/xrdp-sesman.pid
+            /usr/sbin/xrdp-sesman --nodaemon &
+            sleep 2
+            /usr/sbin/xrdp --nodaemon &
+            sleep 3
+          fi
+
+          if ss -tlnp | grep -q 3389; then
+            echo "✅ xrdp is listening on port 3389 (connect from Tailscale peer)"
+          else
+            echo "❌ xrdp still not on 3389"
+            cat /var/log/xrdp/xrdp.log 2>/dev/null || true
+          fi
+
+          if ss -tlnp | grep -q ':22'; then
+            echo "✅ sshd listening on port 22 — connect via: ssh root@$TAILSCALE_IP"
+          else
+            echo "❌ sshd not running"
+          fi
+
+          echo ""
+          tailscale status || true
+
+      - name: Install and Configure OpenClaw
+        env:
+          OC_NV_API_KEY: ${{ secrets.OPENCLAW_NV_API_KEY }}
+          OC_TG_TOKEN: ${{ secrets.OPENCLAW_TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Install OpenClaw
+          curl -fsSL https://openclaw.ai/install.sh | bash
+
+          mkdir -p /root/.openclaw
+
+          cat > /root/.openclaw/openclaw.json << 'EOF'
+          {
+            "agent": {
+              "workspace": "/root/.openclaw/workspace"
+            },
+            "gateway": {
+              "bind": "127.0.0.1",
+              "port": 18789,
+              "auth": {
+                "mode": "token",
+                "token": "AUTO_REPLACE_GATEWAY_TOKEN"
+              }
+            },
+            "providers": {
+              "custom-integrate-api-nvidia-com": {
+                "type": "openai-compatible",
+                "baseUrl": "https://integrate.api.nvidia.com/v1",
+                "apiKey": "AUTO_REPLACE_NV_API_KEY",
+                "models": {
+                  "qwen/qwen3-coder-480b-a35b-instruct": {
+                    "id": "qwen/qwen3-coder-480b-a35b-instruct",
+                    "alias": "qwen-coder"
+                  }
+                }
+              }
+            },
+            "agents": {
+              "default": {
+                "model": "custom-integrate-api-nvidia-com/qwen/qwen3-coder-480b-a35b-instruct"
+              }
+            },
+            "channels": {
+              "telegram": {
+                "enabled": true,
+                "botToken": "AUTO_REPLACE_TELEGRAM_BOT_TOKEN",
+                "dmPolicy": "pairing",
+                "allowFrom": ["*"]
+              }
+            },
+            "hooks": {
+              "boot-md": { "enabled": true },
+              "bootstrap-extra-files": { "enabled": true },
+              "command-logger": { "enabled": true },
+              "session-memory": { "enabled": true }
+            }
+          }
+          EOF
+
+          GATEWAY_TOKEN=$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 64)
+          sed -i "s/AUTO_REPLACE_NV_API_KEY/${OC_NV_API_KEY}/" /root/.openclaw/openclaw.json
+          sed -i "s/AUTO_REPLACE_TELEGRAM_BOT_TOKEN/${OC_TG_TOKEN}/" /root/.openclaw/openclaw.json
+          sed -i "s/AUTO_REPLACE_GATEWAY_TOKEN/${GATEWAY_TOKEN}/" /root/.openclaw/openclaw.json
+
+          echo "OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}" >> $GITHUB_ENV
+
+          # Start gateway non-interactively
+          openclaw gateway start --daemon --config /root/.openclaw/openclaw.json
+
+          # Health loop to avoid 1006 errors
+          for i in $(seq 1 30); do
+            if openclaw health --json >/dev/null 2>&1; then
+              echo "✅ OpenClaw gateway is healthy on 127.0.0.1:18789"
+              break
+            fi
+            echo "Waiting for OpenClaw gateway... ($i/30)"
+            sleep 2
+          done
+
+      - name: Maintain Connection
+        run: |
+          echo ""
+          echo "======================================="
+          echo "           KALI RDP ACCESS             "
+          echo "======================================="
+          echo "  Tailscale IP : $TAILSCALE_IP"
+          echo "  RDP Username : RDP"
+          echo "  RDP Password : $RDP_PASSWORD"
+          echo "  SSH Root Pass: $ROOT_SSH_PASS"
+          echo "======================================="
+          echo "  RDP Connect  : $TAILSCALE_IP:3389"
+          echo "  SSH Connect  : ssh root@$TAILSCALE_IP"
+          echo "======================================="
+          echo ""
+          echo "=========== OPENCLAW DASHBOARD ==============="
+          echo "  Local URL   : http://127.0.0.1:18789/"
+          echo "  With token  : http://127.0.0.1:18789/#token=$OPENCLAW_GATEWAY_TOKEN"
+          echo "  From your PC:"
+          echo "    ssh -N -L 18789:127.0.0.1:18789 root@$TAILSCALE_IP"
+          echo "    then open: http://localhost:18789/"
+          echo "              http://localhost:18789/#token=$OPENCLAW_GATEWAY_TOKEN"
+          echo "=============================================="
+          echo ""
+          echo "Cancel this workflow run to terminate the session"
+          echo ""
+
+          while true; do
+            echo "[$(date)] ✅ Session active — $TAILSCALE_IP:3389"
+            if ! ss -tlnp | grep -q 3389; then
+              echo "⚠️ xrdp died, restarting..."
+              rm -f /var/run/xrdp/xrdp.pid /var/run/xrdp/xrdp-sesman.pid
+              /usr/sbin/xrdp-sesman --nodaemon &
+              sleep 2
+              /usr/sbin/xrdp --nodaemon &
+              sleep 2
+            fi
+            sleep 300
+          done
