@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  secure-shell:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     container:
@@ -12,7 +12,7 @@ jobs:
       options: --privileged
 
     steps:
-      - name: Install Dependencies
+      - name: Install Kali Tools (Headless)
         run: |
           export DEBIAN_FRONTEND=noninteractive
 
@@ -28,15 +28,17 @@ jobs:
 
           for i in 1 2 3; do apt-get update -y && break || sleep 10; done
 
+          # Headless Kali + full toolset (no GUI)
+          # headless: no desktop; default: usual Kali tools
+          # you can also add kali-linux-everything but it's huge
           for i in 1 2 3; do
             apt-get install -y --fix-missing \
-              kali-desktop-xfce kali-themes kali-menu \
-              xrdp xorgxrdp \
-              dbus dbus-x11 \
-              sudo procps net-tools iproute2 \
-              kali-linux-default && break || sleep 15
+              kali-linux-headless \
+              kali-linux-default \
+              sudo procps net-tools iproute2 dbus dbus-x11 && break || sleep 15
           done
 
+          # Tailscale repo
           curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
             | tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
 
@@ -46,7 +48,7 @@ jobs:
           for i in 1 2 3; do apt-get update -y && break || sleep 10; done
           for i in 1 2 3; do apt-get install -y tailscale && break || sleep 10; done
 
-          echo "✅ All dependencies installed"
+          echo "✅ Headless Kali tools + Tailscale installed"
 
       - name: Install and Enable SSH Server
         run: |
@@ -71,79 +73,6 @@ jobs:
             exit 1
           fi
 
-      - name: Configure Core RDP Settings
-        run: |
-          dbus-uuidgen | tee /etc/machine-id /var/lib/dbus/machine-id || true
-
-          echo "allowed_users=anybody" > /etc/X11/Xwrapper.config
-          echo "needs_root_rights=yes" >> /etc/X11/Xwrapper.config
-
-          cat > /root/.xsession << 'EOF'
-          export XDG_SESSION_TYPE=x11
-          export XDG_CONFIG_DIRS=/etc/xdg
-          export XDG_DATA_DIRS=/usr/share/xfce4:/usr/share/xfce4/panel/plugins:/usr/share
-          unset DBUS_SESSION_BUS_ADDRESS
-          startxfce4
-          EOF
-          chmod +x /root/.xsession
-
-          sed -i 's/use_vsock=true/use_vsock=false/g' /etc/xrdp/xrdp.ini || true
-          sed -i 's/^port=.*/port=tcp:\/\/:3389/' /etc/xrdp/xrdp.ini || \
-            echo "port=tcp://:3389" >> /etc/xrdp/xrdp.ini
-
-          mkdir -p /etc/polkit-1/localauthority/50-local.d/
-          cat > /etc/polkit-1/localauthority/50-local.d/allow-all.pkla << 'EOF'
-          [Allow all users]
-          Identity=unix-user:*
-          Action=*
-          ResultAny=yes
-          ResultInactive=yes
-          ResultActive=yes
-          EOF
-
-          mkdir -p /var/run/xrdp /var/log/xrdp /var/run/dbus
-          chmod 755 /var/run/xrdp
-
-          rm -f /var/run/xrdp/xrdp.pid /var/run/xrdp/xrdp-sesman.pid
-
-          /usr/sbin/xrdp-sesman --nodaemon &
-          sleep 2
-          /usr/sbin/xrdp --nodaemon &
-          sleep 3
-
-          if ss -tlnp | grep -q 3389; then
-            echo "✅ xrdp is listening on port 3389"
-          else
-            echo "⚠️ xrdp not on 3389, checking logs..."
-            cat /var/log/xrdp/xrdp.log 2>/dev/null || true
-            cat /var/log/xrdp-sesman.log 2>/dev/null || true
-            ps aux | grep xrdp
-            exit 1
-          fi
-
-      - name: Create RDP User with Secure Password
-        run: |
-          PASSWORD=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 16)
-
-          userdel -r RDP 2>/dev/null || true
-          useradd -m -s /bin/bash RDP
-          echo "RDP:$PASSWORD" | chpasswd
-          usermod -aG sudo RDP
-
-          cat > /home/RDP/.xsession << 'EOF'
-          export XDG_SESSION_TYPE=x11
-          export XDG_CONFIG_DIRS=/etc/xdg
-          unset DBUS_SESSION_BUS_ADDRESS
-          startxfce4
-          EOF
-          chmod +x /home/RDP/.xsession
-          chown RDP:RDP /home/RDP/.xsession
-
-          echo "RDP_PASSWORD=$PASSWORD" >> $GITHUB_ENV
-
-          id RDP || { echo "❌ User creation failed"; exit 1; }
-          echo "✅ RDP user created successfully"
-
       - name: Establish Tailscale Connection
         run: |
           tailscaled --state=/tmp/tailscaled.state --tun=userspace-networking &
@@ -151,7 +80,7 @@ jobs:
 
           tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=gh-runner-$GITHUB_RUN_ID \
+            --hostname=gh-open-kali-$GITHUB_RUN_ID \
             --accept-routes \
             --accept-dns=false \
             --ssh
@@ -175,26 +104,6 @@ jobs:
           echo "✅ Tailscale IP: $TS_IP"
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
-      - name: Verify and Fix RDP
-        run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
-
-          if ! ss -tlnp | grep -q 3389; then
-            echo "xrdp not running, restarting..."
-            rm -f /var/run/xrdp/xrdp.pid /var/run/xrdp/xrdp-sesman.pid
-            /usr/sbin/xrdp-sesman --nodaemon &
-            sleep 2
-            /usr/sbin/xrdp --nodaemon &
-            sleep 3
-          fi
-
-          if ss -tlnp | grep -q 3389; then
-            echo "✅ xrdp is listening on port 3389 (connect from Tailscale peer)"
-          else
-            echo "❌ xrdp still not on 3389"
-            cat /var/log/xrdp/xrdp.log 2>/dev/null || true
-          fi
-
           if ss -tlnp | grep -q ':22'; then
             echo "✅ sshd listening on port 22 — connect via: ssh root@$TAILSCALE_IP"
           else
@@ -212,7 +121,6 @@ jobs:
           set -e
           export DEBIAN_FRONTEND=noninteractive
 
-          # Install OpenClaw
           curl -fsSL https://openclaw.ai/install.sh | bash
 
           mkdir -p /root/.openclaw
@@ -267,15 +175,14 @@ jobs:
 
           GATEWAY_TOKEN=$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 64)
           sed -i "s/AUTO_REPLACE_NV_API_KEY/${OC_NV_API_KEY}/" /root/.openclaw/openclaw.json
+          sed -i "s/AUTO_REPLACE_TERMINOLOGY//" /root/.openclaw/openclaw.json || true
           sed -i "s/AUTO_REPLACE_TELEGRAM_BOT_TOKEN/${OC_TG_TOKEN}/" /root/.openclaw/openclaw.json
           sed -i "s/AUTO_REPLACE_GATEWAY_TOKEN/${GATEWAY_TOKEN}/" /root/.openclaw/openclaw.json
 
           echo "OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}" >> $GITHUB_ENV
 
-          # Start gateway non-interactively
           openclaw gateway start --daemon --config /root/.openclaw/openclaw.json
 
-          # Health loop to avoid 1006 errors
           for i in $(seq 1 30); do
             if openclaw health --json >/dev/null 2>&1; then
               echo "✅ OpenClaw gateway is healthy on 127.0.0.1:18789"
@@ -285,18 +192,15 @@ jobs:
             sleep 2
           done
 
-      - name: Maintain Connection
+      - name: Maintain Session (SSH + OpenClaw)
         run: |
           echo ""
           echo "======================================="
-          echo "           KALI RDP ACCESS             "
+          echo "         KALI HEADLESS ACCESS          "
           echo "======================================="
           echo "  Tailscale IP : $TAILSCALE_IP"
-          echo "  RDP Username : RDP"
-          echo "  RDP Password : $RDP_PASSWORD"
           echo "  SSH Root Pass: $ROOT_SSH_PASS"
           echo "======================================="
-          echo "  RDP Connect  : $TAILSCALE_IP:3389"
           echo "  SSH Connect  : ssh root@$TAILSCALE_IP"
           echo "======================================="
           echo ""
@@ -313,14 +217,6 @@ jobs:
           echo ""
 
           while true; do
-            echo "[$(date)] ✅ Session active — $TAILSCALE_IP:3389"
-            if ! ss -tlnp | grep -q 3389; then
-              echo "⚠️ xrdp died, restarting..."
-              rm -f /var/run/xrdp/xrdp.pid /var/run/xrdp/xrdp-sesman.pid
-              /usr/sbin/xrdp-sesman --nodaemon &
-              sleep 2
-              /usr/sbin/xrdp --nodaemon &
-              sleep 2
-            fi
+            echo "[$(date)] ✅ Session active — SSH on $TAILSCALE_IP"
             sleep 300
           done
