@@ -1,4 +1,4 @@
-name: KALI-RDP
+name: Kali
 
 on:
   workflow_dispatch:
@@ -17,13 +17,14 @@ jobs:
         --tmpfs /tmp
         --tmpfs /run
         --tmpfs /run/lock
-      entrypoint: /lib/systemd/systemd
+        --entrypoint /lib/systemd/systemd
 
     steps:
       - name: Wait for Systemd to Boot
         run: |
           echo "Waiting for systemd to initialize..."
-          timeout 30 bash -c 'until systemctl is-system-running 2>/dev/null | grep -qE "running|degraded"; do sleep 2; done'
+          timeout 60 bash -c \
+            'until systemctl is-system-running 2>/dev/null | grep -qE "running|degraded"; do sleep 2; done' || true
           systemctl --version
           echo "✅ Systemd is ready"
 
@@ -227,11 +228,9 @@ jobs:
           echo "======================================="
           echo ""
 
-          # Keep alive + auto-heal services
           while true; do
             echo "[$(date)] ✅ Active — $TAILSCALE_IP:3389"
 
-            # Auto-restart xrdp if it dies
             if ! ss -tlnp | grep -q 3389; then
               echo "⚠️ xrdp died, restarting..."
               systemctl restart xrdp || true
