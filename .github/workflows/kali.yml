@@ -20,7 +20,7 @@ jobs:
             --tmpfs /run \
             --tmpfs /run/lock \
             kalilinux/kali-rolling \
-            /lib/systemd/systemd
+            /usr/lib/systemd/systemd
 
           echo "Waiting for systemd to initialize..."
           for i in $(seq 1 30); do
@@ -31,7 +31,7 @@ jobs:
             echo "Attempt $i/30..."
             sleep 3
           done
-
+          
       - name: Install Dependencies
         run: |
           docker exec kali bash -c '
