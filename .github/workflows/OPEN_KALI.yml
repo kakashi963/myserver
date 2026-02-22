@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  secure-shell:
+  kali-headless:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     container:
@@ -12,26 +12,27 @@ jobs:
       options: --privileged
 
     steps:
-      - name: Install Kali Tools (Headless)
+      - name: Install Kali Tools (All, No GUI)
         run: |
           export DEBIAN_FRONTEND=noninteractive
 
-          echo "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" > /etc/apt/sources.list
+          echo "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
+            > /etc/apt/sources.list
 
           for i in 1 2 3; do apt-get update -y && break || sleep 10; done
-
           apt-get install -y --fix-missing ca-certificates curl gnupg wget
 
-          echo "deb https://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" > /etc/apt/sources.list
+          echo "deb https://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
+            > /etc/apt/sources.list
 
           for i in 1 2 3; do apt-get update -y && break || sleep 10; done
 
-          # Headless Kali + full toolset (no GUI)
+          # Massive toolset: installs (almost) everything, no desktop by itself
+          # You can swap for kali-linux-full or kali-linux-default if this is too big.
           for i in 1 2 3; do
             apt-get install -y --fix-missing \
-              kali-linux-headless \
-              kali-linux-default \
-              sudo procps net-tools iproute2 dbus dbus-x11 && break || sleep 15
+              kali-linux-everything \
+              sudo procps net-tools iproute2 dbus dbus-x11 && break || sleep 30
           done
 
           # Tailscale repo
@@ -44,7 +45,7 @@ jobs:
           for i in 1 2 3; do apt-get update -y && break || sleep 10; done
           for i in 1 2 3; do apt-get install -y tailscale && break || sleep 10; done
 
-          echo "✅ Headless Kali tools + Tailscale installed"
+          echo "✅ Kali tools (everything) + Tailscale installed"
 
       - name: Install and Enable SSH Server
         run: |
@@ -76,7 +77,7 @@ jobs:
 
           tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=gh-open-kali-$GITHUB_RUN_ID \
+            --hostname=open-kali-$GITHUB_RUN_ID \
             --accept-routes \
             --accept-dns=false \
             --ssh
@@ -109,16 +110,33 @@ jobs:
           echo ""
           tailscale status || true
 
-      - name: Maintain Session (SSH Only)
+      - name: Install OpenClaw (CLI only, no setup)
+        run: |
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Just install OpenClaw. The installer will install Node 22+ if needed.
+          # We do NOT run configure / gateway / Telegram / anything else here.
+          curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+
+          # Show version so you know it's installed; later you can run `openclaw configure`
+          openclaw --version || openclaw help
+
+      - name: Maintain Session
         run: |
           echo ""
           echo "======================================="
-          echo "         KALI HEADLESS ACCESS          "
+          echo "        KALI HEADLESS + OPENCLAW       "
           echo "======================================="
           echo "  Tailscale IP : $TAILSCALE_IP"
           echo "  SSH Root Pass: $ROOT_SSH_PASS"
           echo "======================================="
           echo "  SSH Connect  : ssh root@$TAILSCALE_IP"
+          echo "======================================="
+          echo ""
+          echo "OpenClaw is installed. After SSH-ing in, you can run:"
+          echo "  openclaw configure"
+          echo "  openclaw config ..."
           echo "======================================="
           echo ""
           echo "Cancel this workflow run to terminate the session"
