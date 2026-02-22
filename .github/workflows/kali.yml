@@ -1,4 +1,4 @@
-name: Kali
+name: KALI-RDP
 
 on:
   workflow_dispatch:
