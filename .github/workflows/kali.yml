@@ -90,7 +90,7 @@ jobs:
 
             mkdir -p /var/run/sshd
 
-            ROOT_PASS=$(cat /dev/urandom | tr -dc "A-Za-z0-9!@#\$%^&*" | head -c 20)
+            ROOT_PASS=$(cat /dev/urandom | tr -dc "A-Za-z0-9" | head -c 20)
             echo "root:$ROOT_PASS" | chpasswd
             echo "ROOT_SSH_PASS=$ROOT_PASS" >> /tmp/env_vars
 
@@ -108,7 +108,6 @@ jobs:
               exit 1
             fi
           '
-          # Pull env vars out of container
           ROOT_SSH_PASS=$(docker exec kali bash -c 'grep ROOT_SSH_PASS /tmp/env_vars | cut -d= -f2')
           echo "ROOT_SSH_PASS=$ROOT_SSH_PASS" >> $GITHUB_ENV
 
@@ -120,26 +119,14 @@ jobs:
             echo "allowed_users=anybody" > /etc/X11/Xwrapper.config
             echo "needs_root_rights=yes" >> /etc/X11/Xwrapper.config
 
-            cat > /root/.xsession << EOF
-            export XDG_SESSION_TYPE=x11
-            export XDG_CONFIG_DIRS=/etc/xdg
-            export XDG_DATA_DIRS=/usr/share/xfce4:/usr/share/xfce4/panel/plugins:/usr/share
-            unset DBUS_SESSION_BUS_ADDRESS
-            startxfce4
-EOF
+            printf "export XDG_SESSION_TYPE=x11\nexport XDG_CONFIG_DIRS=/etc/xdg\nexport XDG_DATA_DIRS=/usr/share/xfce4:/usr/share/xfce4/panel/plugins:/usr/share\nunset DBUS_SESSION_BUS_ADDRESS\nstartxfce4\n" > /root/.xsession
             chmod +x /root/.xsession
 
             sed -i "s/use_vsock=true/use_vsock=false/g" /etc/xrdp/xrdp.ini || true
 
             mkdir -p /etc/polkit-1/localauthority/50-local.d/
-            cat > /etc/polkit-1/localauthority/50-local.d/allow-all.pkla << EOF
-[Allow all users]
-Identity=unix-user:*
-Action=*
-ResultAny=yes
-ResultInactive=yes
-ResultActive=yes
-EOF
+            printf "[Allow all users]\nIdentity=unix-user:*\nAction=*\nResultAny=yes\nResultInactive=yes\nResultActive=yes\n" \
+              > /etc/polkit-1/localauthority/50-local.d/allow-all.pkla
 
             mkdir -p /var/run/xrdp /var/log/xrdp
             chmod 755 /var/run/xrdp
@@ -160,19 +147,14 @@ EOF
       - name: Create RDP User
         run: |
           docker exec kali bash -c '
-            PASSWORD=$(cat /dev/urandom | tr -dc "A-Za-z0-9!@#\$%^&*" | head -c 16)
+            PASSWORD=$(cat /dev/urandom | tr -dc "A-Za-z0-9" | head -c 16)
 
             userdel -r RDP 2>/dev/null || true
             useradd -m -s /bin/bash RDP
             echo "RDP:$PASSWORD" | chpasswd
             usermod -aG sudo RDP
 
-            cat > /home/RDP/.xsession << EOF
-            export XDG_SESSION_TYPE=x11
-            export XDG_CONFIG_DIRS=/etc/xdg
-            unset DBUS_SESSION_BUS_ADDRESS
-            startxfce4
-EOF
+            printf "export XDG_SESSION_TYPE=x11\nexport XDG_CONFIG_DIRS=/etc/xdg\nunset DBUS_SESSION_BUS_ADDRESS\nstartxfce4\n" > /home/RDP/.xsession
             chmod +x /home/RDP/.xsession
             chown RDP:RDP /home/RDP/.xsession
 
