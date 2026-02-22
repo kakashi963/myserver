@@ -9,6 +9,35 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: Build Kali Image with Systemd
+        run: |
+          cat > Dockerfile << 'EOF'
+          FROM kalilinux/kali-rolling
+
+          ENV DEBIAN_FRONTEND=noninteractive
+
+          RUN echo "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
+                > /etc/apt/sources.list && \
+              apt-get update -y && \
+              apt-get install -y --fix-missing \
+                systemd \
+                systemd-sysv \
+                ca-certificates curl gnupg wget && \
+              apt-get clean && \
+              rm -rf /lib/systemd/system/multi-user.target.wants/* \
+                     /lib/systemd/system/local-fs.target.wants/* \
+                     /lib/systemd/system/sockets.target.wants/*udev* \
+                     /lib/systemd/system/sockets.target.wants/*initctl* \
+                     /lib/systemd/system/sysinit.target.wants/systemd-tmpfiles-setup* \
+                     /lib/systemd/system/systemd-update-utmp*
+
+          VOLUME ["/sys/fs/cgroup"]
+          CMD ["/usr/lib/systemd/systemd"]
+          EOF
+
+          docker build -t kali-systemd .
+          echo "✅ Image built"
+
       - name: Start Kali Container with Systemd
         run: |
           docker run -d \
@@ -19,8 +48,7 @@ jobs:
             --tmpfs /tmp \
             --tmpfs /run \
             --tmpfs /run/lock \
-            kalilinux/kali-rolling \
-            /usr/lib/systemd/systemd
+            kali-systemd
 
           echo "Waiting for systemd to initialize..."
           for i in $(seq 1 30); do
@@ -31,20 +59,11 @@ jobs:
             echo "Attempt $i/30..."
             sleep 3
           done
-          
+
       - name: Install Dependencies
         run: |
           docker exec kali bash -c '
             export DEBIAN_FRONTEND=noninteractive
-
-            echo "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
-              > /etc/apt/sources.list
-
-            for i in 1 2 3; do
-              apt-get update -y && break || sleep 10
-            done
-
-            apt-get install -y --fix-missing ca-certificates curl gnupg wget
 
             echo "deb https://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware" \
               > /etc/apt/sources.list
