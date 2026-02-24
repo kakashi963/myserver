@@ -1,0 +1,117 @@
+name: macOS Remote Access
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-remote:
+    runs-on: macos-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Enable Screen Sharing (VNC)
+        run: |
+          # Enable Remote Management / Screen Sharing
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -restart -agent -privs -all
+
+          # Allow all users to VNC
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement.plist ARD_AllLocalUsers -bool YES
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement.plist ARD_AllLocalUsersPrivs -int 1073741823
+
+      - name: Create Remote User with Secure Password
+        run: |
+          # Generate a random secure password
+          PASSWORD=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9@#$%' | head -c 16)
+
+          # Create a new local user
+          sudo dscl . -create /Users/RemoteUser
+          sudo dscl . -create /Users/RemoteUser UserShell /bin/zsh
+          sudo dscl . -create /Users/RemoteUser RealName "Remote User"
+          sudo dscl . -create /Users/RemoteUser UniqueID "600"
+          sudo dscl . -create /Users/RemoteUser PrimaryGroupID "20"
+          sudo dscl . -create /Users/RemoteUser NFSHomeDirectory /Users/RemoteUser
+          sudo dscl . -passwd /Users/RemoteUser "$PASSWORD"
+
+          # Add to admin group
+          sudo dscl . -append /Groups/admin GroupMembership RemoteUser
+
+          echo "REMOTE_CREDS=User: RemoteUser | Password: $PASSWORD" >> $GITHUB_ENV
+
+      - name: Set VNC Password
+        run: |
+          # Extract password from env
+          VNC_PASS=$(echo "$REMOTE_CREDS" | awk -F'Password: ' '{print $2}')
+
+          # Set VNC password (max 8 chars for VNC)
+          VNC_PASS_TRUNC=$(echo "$VNC_PASS" | cut -c1-8)
+
+          sudo mkdir -p /Library/Preferences/com.apple.VNCSettings.txt
+          printf '%s' "$VNC_PASS_TRUNC" | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
+
+          # Restart ARD agent to apply
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -restart -agent
+
+      - name: Install Tailscale
+        run: |
+          # Download and install Tailscale for macOS
+          TS_URL="https://pkgs.tailscale.com/stable/Tailscale-latest-macos.pkg"
+          curl -fsSL "$TS_URL" -o /tmp/tailscale.pkg
+          sudo installer -pkg /tmp/tailscale.pkg -target /
+          rm /tmp/tailscale.pkg
+
+      - name: Establish Tailscale Connection
+        run: |
+          # Start tailscaled daemon
+          sudo /Applications/Tailscale.app/Contents/MacOS/tailscaled &
+          sleep 5
+
+          # Bring up Tailscale with auth key and unique hostname
+          sudo /Applications/Tailscale.app/Contents/MacOS/tailscale up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=gh-mac-runner-$GITHUB_RUN_ID
+
+          # Wait for IP assignment
+          TS_IP=""
+          RETRIES=0
+          while [ -z "$TS_IP" ] && [ "$RETRIES" -lt 10 ]; do
+            TS_IP=$(sudo /Applications/Tailscale.app/Contents/MacOS/tailscale ip -4)
+            sleep 5
+            RETRIES=$((RETRIES + 1))
+          done
+
+          if [ -z "$TS_IP" ]; then
+            echo "Tailscale IP not assigned. Exiting."
+            exit 1
+          fi
+
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Verify VNC Accessibility
+        run: |
+          echo "Tailscale IP: $TAILSCALE_IP"
+
+          # Test VNC port 5900 connectivity
+          nc -zv "$TAILSCALE_IP" 5900 && echo "VNC port 5900 is open!" || {
+            echo "VNC port check failed"
+            exit 1
+          }
+
+      - name: Maintain Connection
+        run: |
+          echo ""
+          echo "=== macOS REMOTE ACCESS ==="
+          echo "Tailscale IP : $TAILSCALE_IP"
+          echo "VNC Address  : vnc://$TAILSCALE_IP:5900"
+          echo "SSH Address  : ssh RemoteUser@$TAILSCALE_IP"
+          echo "Credentials  : $REMOTE_CREDS"
+          echo "============================"
+          echo ""
+
+          # Keep runner alive until manually cancelled
+          while true; do
+            echo "[$(date)] Remote session active - cancel workflow to terminate"
+            sleep 300
+          done
