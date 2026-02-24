@@ -6,24 +6,20 @@ on:
 jobs:
   macos-remote:
     runs-on: macos-latest
-    timeout-minutes: 355  # GitHub Actions hard cap is 6hrs; 355min is safe max
+    timeout-minutes: 355
 
     steps:
-      - name: Enable Screen Sharing (VNC) and SSH
+      - name: Enable SSH
         run: |
-          # Enable ARD / Screen Sharing
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on \
-            -allowAccessFor -allUsers \
-            -privs -all \
-            -restart -agent
-
-          # Enable SSH (Remote Login)
           sudo systemsetup -setremotelogin on
+          echo "✅ SSH enabled"
 
-      - name: Create Remote User with Secure Password
+      - name: Create Remote User
         run: |
           PASSWORD=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 20)
+
+          # Remove user if already exists (clean slate)
+          sudo dscl . -delete /Users/RemoteUser 2>/dev/null || true
 
           sudo dscl . -create /Users/RemoteUser
           sudo dscl . -create /Users/RemoteUser UserShell /bin/zsh
@@ -32,96 +28,123 @@ jobs:
           sudo dscl . -create /Users/RemoteUser PrimaryGroupID "20"
           sudo dscl . -create /Users/RemoteUser NFSHomeDirectory /Users/RemoteUser
           sudo dscl . -passwd /Users/RemoteUser "$PASSWORD"
-
           sudo dscl . -append /Groups/admin GroupMembership RemoteUser
-          sudo createhomedir -c -u RemoteUser || true
+          sudo createhomedir -c -u RemoteUser 2>/dev/null || true
 
           echo "REMOTE_PASSWORD=$PASSWORD" >> $GITHUB_ENV
           echo "✅ User RemoteUser created"
 
-      - name: Set VNC Password
+      - name: Enable and Configure VNC
         run: |
-          # macOS VNC password must be set via ARD kickstart — NOT written as plaintext
-          # The kickstart tool handles the required binary obfuscation
+          # Full ARD activate with all privileges
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -clientopts -setvnclegacy -vnclegacy yes \
-            -setvncpw -vncpw "$REMOTE_PASSWORD"
+            -activate \
+            -configure \
+            -access -on \
+            -allowAccessFor -allUsers \
+            -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -setvncpw -vncpw "$REMOTE_PASSWORD" \
+            -restart -agent -verbose
 
+          sleep 3
+          echo "✅ VNC configured"
+
+      - name: Wake Display / Start GUI Session
+        run: |
+          # Attempt to wake WindowServer (may already be running)
+          sudo launchctl kickstart -k system/com.apple.WindowServer 2>/dev/null || true
+          sleep 5
+
+          # Open Finder as the runner user to create an active GUI session
+          open /System/Applications/Finder.app 2>/dev/null || true
+          sleep 3
+
+          # Also try opening as RemoteUser
+          sudo -u RemoteUser open /System/Applications/Finder.app 2>/dev/null || true
+          sleep 3
+
+          # Set a desktop background so screen isn't blank gray
+          osascript -e 'tell application "Finder" to set desktop picture to POSIX file "/System/Library/Desktop Pictures/Sequoia.heic"' 2>/dev/null || \
+          osascript -e 'tell application "Finder" to set desktop picture to POSIX file "/System/Library/Desktop Pictures/Big Sur.heic"' 2>/dev/null || \
+          osascript -e 'tell application "Finder" to set desktop picture to POSIX file "/System/Library/Desktop Pictures/Monterey.heic"' 2>/dev/null || true
+
+          # Restart ARD agent now that GUI is alive
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -restart -agent
 
-          echo "✅ VNC password set"
+          sleep 5
+          echo "✅ GUI session started"
 
       - name: Install Tailscale
         run: |
-          # Install via Homebrew — stable, versioned, CLI on PATH
           brew install tailscale
           echo "✅ Tailscale installed: $(tailscale version)"
 
-      - name: Establish Tailscale Connection
+      - name: Start Tailscale
         run: |
-          # Start the Tailscale daemon
-          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &
-          sleep 5
+          # Create state directory
+          sudo mkdir -p /var/lib/tailscale
 
-          # Authenticate and connect
+          # Start daemon in background
+          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --tun=userspace-networking &
+          DAEMON_PID=$!
+          echo "Tailscaled PID: $DAEMON_PID"
+          sleep 8
+
+          # Connect to Tailscale
           sudo tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=gh-mac-runner-$GITHUB_RUN_ID \
-            --accept-routes
+            --hostname=gh-mac-$GITHUB_RUN_ID \
+            --accept-routes \
+            --accept-dns=false
 
-          # Wait for IP assignment
+          # Wait for IP
           TS_IP=""
           RETRIES=0
           while [ -z "$TS_IP" ] && [ "$RETRIES" -lt 30 ]; do
-            TS_IP=$(tailscale ip -4 2>/dev/null | head -n1 | tr -d '[:space:]')
-            if [ -z "$TS_IP" ]; then
-              echo "Waiting for Tailscale IP... attempt $((RETRIES+1))/30"
-              sleep 5
-            fi
-            RETRIES=$((RETRIES + 1))
+            TS_IP=$(sudo tailscale ip -4 2>/dev/null | head -n1 | tr -d '[:space:]')
+            [ -z "$TS_IP" ] && echo "Waiting... ($((RETRIES+1))/30)" && sleep 5
+            RETRIES=$((RETRIES+1))
           done
 
           if [ -z "$TS_IP" ]; then
-            echo "❌ Tailscale IP not assigned after $RETRIES attempts"
-            tailscale status
+            echo "❌ Could not get Tailscale IP"
+            sudo tailscale status
             exit 1
           fi
 
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          echo "✅ Tailscale connected: $TS_IP"
+          echo "✅ Tailscale IP: $TS_IP"
 
-      - name: Verify Ports
+      - name: Verify Connectivity
         run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "--- Port Check ---"
+          nc -z -G5 "$TAILSCALE_IP" 5900 && echo "✅ VNC :5900 OPEN" || echo "⚠️  VNC :5900 not responding"
+          nc -z -G5 "$TAILSCALE_IP" 22   && echo "✅ SSH :22   OPEN" || echo "⚠️  SSH :22   not responding"
 
-          # VNC port check (macOS nc syntax is compatible with -z)
-          nc -z -G5 "$TAILSCALE_IP" 5900 \
-            && echo "✅ VNC port 5900 is open" \
-            || echo "⚠️  VNC port 5900 not yet open (ARD may still be binding)"
-
-          # SSH port check
-          nc -z -G5 "$TAILSCALE_IP" 22 \
-            && echo "✅ SSH port 22 is open" \
-            || echo "⚠️  SSH port 22 not yet open"
-
-      - name: Print Connection Info
+      - name: Connection Info
         run: |
           echo ""
-          echo "🎉 ========== macOS REMOTE ACCESS READY =========="
-          echo "  Tailscale IP : $TAILSCALE_IP"
-          echo "  VNC Address  : vnc://$TAILSCALE_IP:5900"
-          echo "  SSH Address  : ssh RemoteUser@$TAILSCALE_IP"
-          echo "  Username     : RemoteUser"
-          echo "  Password     : $REMOTE_PASSWORD"
-          echo "=================================================="
+          echo "╔══════════════════════════════════════════════╗"
+          echo "║       macOS REMOTE ACCESS IS READY           ║"
+          echo "╠══════════════════════════════════════════════╣"
+          echo "║  Tailscale IP : $TAILSCALE_IP"
+          echo "║  VNC Address  : $TAILSCALE_IP:5900"
+          echo "║  SSH Address  : ssh RemoteUser@$TAILSCALE_IP"
+          echo "║  Username     : RemoteUser"
+          echo "║  Password     : $REMOTE_PASSWORD"
+          echo "╚══════════════════════════════════════════════╝"
           echo ""
-          echo "Connect now. Cancel this workflow when done."
+          echo "TigerVNC: open TigerVNC → type $TAILSCALE_IP:5900 → connect"
+          echo "SSH:      ssh RemoteUser@$TAILSCALE_IP"
+          echo ""
+          echo "Make sure YOUR machine is also connected to Tailscale!"
+          echo "Cancel this workflow when done."
 
-      - name: Maintain Connection
+      - name: Keep Alive
         run: |
-          # Keep runner alive; GitHub will kill after timeout-minutes
           while true; do
             echo "[$(date)] Session active — cancel workflow to terminate"
-            sleep 300
+            sleep 60
           done
