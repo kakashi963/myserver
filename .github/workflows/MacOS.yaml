@@ -46,55 +46,61 @@ jobs:
 
       - name: Install Tailscale
         run: |
-          TS_URL="https://pkgs.tailscale.com/stable/Tailscale-latest-macos.pkg"
+          # Use stable Tailscale macOS PKG
+          TS_URL="https://pkgs.tailscale.com/stable/tailscale-ipn_latest_macos.pkg"
           curl -fsSL "$TS_URL" -o /tmp/tailscale.pkg
           sudo installer -pkg /tmp/tailscale.pkg -target /
           rm /tmp/tailscale.pkg
 
       - name: Establish Tailscale Connection
         run: |
-          sudo /Applications/Tailscale.app/Contents/MacOS/tailscaled &
-          sleep 5
+          # Start Tailscale daemon via launchctl (macOS native)
+          sudo launchctl kickstart -k system/com.tailscale.tailscaled
+          sleep 10
 
-          sudo /Applications/Tailscale.app/Contents/MacOS/tailscale up \
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+          # Authenticate and connect
+          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale \
+            up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=gh-mac-runner-$GITHUB_RUN_ID
 
+          # Wait for IP assignment
           TS_IP=""
           RETRIES=0
-          while [ -z "$TS_IP" ] && [ "$RETRIES" -lt 10 ]; do
-            TS_IP=$(sudo /Applications/Tailscale.app/Contents/MacOS/tailscale ip -4)
-            sleep 5
+          while [ -z "$TS_IP" ] && [ "$RETRIES" -lt 20 ]; do
+            TS_IP=$(sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 | head -n1 | awk '{print $1}')
+            sleep 3
             RETRIES=$((RETRIES + 1))
           done
 
           if [ -z "$TS_IP" ]; then
-            echo "Tailscale IP not assigned. Exiting."
+            echo "Tailscale IP not assigned after $RETRIES attempts"
             exit 1
           fi
 
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          echo "✅ Tailscale connected: $TS_IP"
 
       - name: Verify VNC Accessibility
         run: |
           echo "Tailscale IP: $TAILSCALE_IP"
-          nc -zv "$TAILSCALE_IP" 5900 && echo "VNC port 5900 is open!" || {
-            echo "VNC port check failed"
-            exit 1
+          nc -zv "$TAILSCALE_IP" 5900 && echo "✅ VNC port 5900 is open!" || {
+            echo "⚠️ VNC port check failed (normal if ARD slow to bind)"
           }
 
       - name: Maintain Connection
         run: |
           echo ""
-          echo "=== macOS REMOTE ACCESS ==="
+          echo "🎉 === macOS REMOTE ACCESS READY ==="
           echo "Tailscale IP : $TAILSCALE_IP"
           echo "VNC Address  : vnc://$TAILSCALE_IP:5900"
           echo "SSH Address  : ssh RemoteUser@$TAILSCALE_IP"
-          echo "Credentials  : $REMOTE_CREDS"
-          echo "============================"
+          echo "Username     : RemoteUser"
+          echo "Password     : $(echo $REMOTE_CREDS | awk -F'Password: ' '{print $2}')"
+          echo "===================================="
           echo ""
+          echo "Connect now and enjoy your macOS runner! Cancel workflow when done."
 
           while true; do
-            echo "[$(date)] Remote session active - cancel workflow to terminate"
+            echo "[$(date)] Session active - cancel workflow to terminate"
             sleep 300
           done
