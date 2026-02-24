@@ -1,4 +1,4 @@
-name: macOS Remote Access
+name: macOS Remote Access (RDP)
 
 on:
   workflow_dispatch:
@@ -19,7 +19,6 @@ jobs:
           PASSWORD=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 20)
 
           sudo dscl . -delete /Users/RemoteUser 2>/dev/null || true
-
           sudo dscl . -create /Users/RemoteUser
           sudo dscl . -create /Users/RemoteUser UserShell /bin/zsh
           sudo dscl . -create /Users/RemoteUser RealName "Remote User"
@@ -33,63 +32,56 @@ jobs:
           echo "REMOTE_PASSWORD=$PASSWORD" >> $GITHUB_ENV
           echo "✅ User RemoteUser created"
 
-      - name: Enable and Configure VNC
+      - name: Install XQuartz + xrdp dependencies
         run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure \
-            -access -on \
-            -allowAccessFor -allUsers \
-            -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -setvncpw -vncpw "$REMOTE_PASSWORD" \
-            -restart -agent -verbose
-          sleep 5
-          echo "✅ VNC configured"
+          # Install xquartz for display, xrdp for RDP server
+          brew install xquartz 2>/dev/null || true
+          brew install xrdp 2>/dev/null || true
 
-      - name: Wake GUI Session (Safe)
-        run: |
-          # DO NOT touch WindowServer via launchctl — it kills the runner
-          # Instead, gently open apps to trigger GUI activity
-
-          # Open Finder (safe, non-destructive)
-          open /System/Applications/Finder.app 2>/dev/null || true
-          sleep 5
-
-          # Find available wallpaper and set it
-          WALLPAPER=""
-          for pic in \
-            "/System/Library/Desktop Pictures/Sequoia.heic" \
-            "/System/Library/Desktop Pictures/Sonoma.heic" \
-            "/System/Library/Desktop Pictures/Ventura.heic" \
-            "/System/Library/Desktop Pictures/Monterey.heic" \
-            "/System/Library/Desktop Pictures/Big Sur.heic" \
-            "/Library/Desktop Pictures/Mojave.jpg" \
-            "/System/Library/Desktop Pictures/Catalina.heic"; do
-            if [ -f "$pic" ]; then
-              WALLPAPER="$pic"
-              break
-            fi
-          done
-
-          if [ -n "$WALLPAPER" ]; then
-            osascript -e "tell application \"Finder\" to set desktop picture to POSIX file \"$WALLPAPER\"" 2>/dev/null || true
-            echo "✅ Wallpaper set: $WALLPAPER"
-          else
-            echo "⚠️ No wallpaper found, skipping"
+          # If xrdp not in brew, build from source via a known tap
+          if ! command -v xrdp &>/dev/null; then
+            echo "xrdp not found via brew, trying alternative..."
+            brew install neutrinolabs/xrdp/xrdp 2>/dev/null || true
           fi
 
-          # Restart ARD gently
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -restart -agent 2>/dev/null || true
-          sleep 3
-
-          echo "✅ GUI session ready"
+          echo "✅ Packages installed"
 
       - name: Install Tailscale
         run: |
           brew install tailscale
           echo "✅ Tailscale installed: $(tailscale version)"
+
+      - name: Configure and Start xrdp
+        run: |
+          # Find xrdp sbin path
+          XRDP_BIN=$(which xrdp 2>/dev/null || find /usr/local /opt/homebrew -name "xrdp" -type f 2>/dev/null | head -1)
+
+          if [ -z "$XRDP_BIN" ]; then
+            echo "❌ xrdp binary not found"
+            exit 1
+          fi
+
+          echo "xrdp found at: $XRDP_BIN"
+
+          # Get config dir
+          XRDP_ETC=$(dirname $(dirname $XRDP_BIN))/etc/xrdp
+          [ ! -d "$XRDP_ETC" ] && XRDP_ETC=/usr/local/etc/xrdp
+          [ ! -d "$XRDP_ETC" ] && XRDP_ETC=/opt/homebrew/etc/xrdp
+
+          echo "xrdp config at: $XRDP_ETC"
+
+          # Start xrdp
+          sudo "$XRDP_BIN" 2>/dev/null &
+          sleep 5
+
+          # Start xrdp-sesman (session manager)
+          SESMAN_BIN=$(which xrdp-sesman 2>/dev/null || find /usr/local /opt/homebrew -name "xrdp-sesman" -type f 2>/dev/null | head -1)
+          if [ -n "$SESMAN_BIN" ]; then
+            sudo "$SESMAN_BIN" 2>/dev/null &
+            sleep 3
+          fi
+
+          echo "✅ xrdp started"
 
       - name: Start Tailscale
         run: |
@@ -116,7 +108,6 @@ jobs:
 
           if [ -z "$TS_IP" ]; then
             echo "❌ Could not get Tailscale IP"
-            sudo tailscale status
             exit 1
           fi
 
@@ -125,24 +116,26 @@ jobs:
 
       - name: Verify Ports
         run: |
-          nc -z -G5 "$TAILSCALE_IP" 5900 && echo "✅ VNC :5900 OPEN" || echo "⚠️  VNC :5900 not open yet"
-          nc -z -G5 "$TAILSCALE_IP" 22   && echo "✅ SSH :22   OPEN" || echo "⚠️  SSH :22   not open yet"
+          nc -z -G5 "$TAILSCALE_IP" 3389 && echo "✅ RDP :3389 OPEN" || echo "⚠️  RDP :3389 not open yet"
+          nc -z -G5 "$TAILSCALE_IP" 22   && echo "✅ SSH :22   OPEN" || echo "⚠️  SSH :22   not open"
 
       - name: Connection Info
         run: |
           echo ""
           echo "╔══════════════════════════════════════════════╗"
-          echo "║       macOS REMOTE ACCESS IS READY           ║"
+          echo "║     macOS REMOTE ACCESS READY (RDP)          ║"
           echo "╠══════════════════════════════════════════════╣"
           echo "║  Tailscale IP : $TAILSCALE_IP"
-          echo "║  VNC Address  : $TAILSCALE_IP:5900"
+          echo "║  RDP Address  : $TAILSCALE_IP:3389"
           echo "║  SSH Address  : ssh RemoteUser@$TAILSCALE_IP"
           echo "║  Username     : RemoteUser"
           echo "║  Password     : $REMOTE_PASSWORD"
           echo "╚══════════════════════════════════════════════╝"
           echo ""
-          echo "TigerVNC → $TAILSCALE_IP:5900 → password from above"
-          echo "Make sure Tailscale is running on YOUR machine too!"
+          echo "Windows: Start → Remote Desktop Connection → $TAILSCALE_IP"
+          echo "OR download Microsoft Remote Desktop from Microsoft Store"
+          echo ""
+          echo "Make sure Tailscale is running on YOUR machine!"
           echo "Cancel this workflow when done."
 
       - name: Keep Alive
