@@ -40,11 +40,12 @@ jobs:
 
       - name: Configure Display & Prevent Sleep
         run: |
-          # Prevent display sleep
-          sudo pmset -a displaysleepnever 1
+          # Prevent display sleep (correct pmset syntax)
           sudo pmset -a sleep 0
+          sudo pmset -a displaysleep 0
           sudo pmset -a autopoweroff 0
           sudo pmset -a standby 0
+          sudo pmset -a powernap 0
           
           # Enable virtual display rendering
           sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutionEnabled -bool true
