@@ -18,7 +18,6 @@ jobs:
         run: |
           PASSWORD=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 20)
 
-          # Remove user if already exists (clean slate)
           sudo dscl . -delete /Users/RemoteUser 2>/dev/null || true
 
           sudo dscl . -create /Users/RemoteUser
@@ -36,7 +35,6 @@ jobs:
 
       - name: Enable and Configure VNC
         run: |
-          # Full ARD activate with all privileges
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure \
@@ -46,35 +44,47 @@ jobs:
             -clientopts -setvnclegacy -vnclegacy yes \
             -setvncpw -vncpw "$REMOTE_PASSWORD" \
             -restart -agent -verbose
-
-          sleep 3
+          sleep 5
           echo "✅ VNC configured"
 
-      - name: Wake Display / Start GUI Session
+      - name: Wake GUI Session (Safe)
         run: |
-          # Attempt to wake WindowServer (may already be running)
-          sudo launchctl kickstart -k system/com.apple.WindowServer 2>/dev/null || true
-          sleep 5
+          # DO NOT touch WindowServer via launchctl — it kills the runner
+          # Instead, gently open apps to trigger GUI activity
 
-          # Open Finder as the runner user to create an active GUI session
+          # Open Finder (safe, non-destructive)
           open /System/Applications/Finder.app 2>/dev/null || true
-          sleep 3
-
-          # Also try opening as RemoteUser
-          sudo -u RemoteUser open /System/Applications/Finder.app 2>/dev/null || true
-          sleep 3
-
-          # Set a desktop background so screen isn't blank gray
-          osascript -e 'tell application "Finder" to set desktop picture to POSIX file "/System/Library/Desktop Pictures/Sequoia.heic"' 2>/dev/null || \
-          osascript -e 'tell application "Finder" to set desktop picture to POSIX file "/System/Library/Desktop Pictures/Big Sur.heic"' 2>/dev/null || \
-          osascript -e 'tell application "Finder" to set desktop picture to POSIX file "/System/Library/Desktop Pictures/Monterey.heic"' 2>/dev/null || true
-
-          # Restart ARD agent now that GUI is alive
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -restart -agent
-
           sleep 5
-          echo "✅ GUI session started"
+
+          # Find available wallpaper and set it
+          WALLPAPER=""
+          for pic in \
+            "/System/Library/Desktop Pictures/Sequoia.heic" \
+            "/System/Library/Desktop Pictures/Sonoma.heic" \
+            "/System/Library/Desktop Pictures/Ventura.heic" \
+            "/System/Library/Desktop Pictures/Monterey.heic" \
+            "/System/Library/Desktop Pictures/Big Sur.heic" \
+            "/Library/Desktop Pictures/Mojave.jpg" \
+            "/System/Library/Desktop Pictures/Catalina.heic"; do
+            if [ -f "$pic" ]; then
+              WALLPAPER="$pic"
+              break
+            fi
+          done
+
+          if [ -n "$WALLPAPER" ]; then
+            osascript -e "tell application \"Finder\" to set desktop picture to POSIX file \"$WALLPAPER\"" 2>/dev/null || true
+            echo "✅ Wallpaper set: $WALLPAPER"
+          else
+            echo "⚠️ No wallpaper found, skipping"
+          fi
+
+          # Restart ARD gently
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -restart -agent 2>/dev/null || true
+          sleep 3
+
+          echo "✅ GUI session ready"
 
       - name: Install Tailscale
         run: |
@@ -83,23 +93,19 @@ jobs:
 
       - name: Start Tailscale
         run: |
-          # Create state directory
           sudo mkdir -p /var/lib/tailscale
 
-          # Start daemon in background
-          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --tun=userspace-networking &
-          DAEMON_PID=$!
-          echo "Tailscaled PID: $DAEMON_PID"
+          sudo tailscaled \
+            --state=/var/lib/tailscale/tailscaled.state \
+            --tun=userspace-networking &
           sleep 8
 
-          # Connect to Tailscale
           sudo tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=gh-mac-$GITHUB_RUN_ID \
             --accept-routes \
             --accept-dns=false
 
-          # Wait for IP
           TS_IP=""
           RETRIES=0
           while [ -z "$TS_IP" ] && [ "$RETRIES" -lt 30 ]; do
@@ -117,11 +123,10 @@ jobs:
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
           echo "✅ Tailscale IP: $TS_IP"
 
-      - name: Verify Connectivity
+      - name: Verify Ports
         run: |
-          echo "--- Port Check ---"
-          nc -z -G5 "$TAILSCALE_IP" 5900 && echo "✅ VNC :5900 OPEN" || echo "⚠️  VNC :5900 not responding"
-          nc -z -G5 "$TAILSCALE_IP" 22   && echo "✅ SSH :22   OPEN" || echo "⚠️  SSH :22   not responding"
+          nc -z -G5 "$TAILSCALE_IP" 5900 && echo "✅ VNC :5900 OPEN" || echo "⚠️  VNC :5900 not open yet"
+          nc -z -G5 "$TAILSCALE_IP" 22   && echo "✅ SSH :22   OPEN" || echo "⚠️  SSH :22   not open yet"
 
       - name: Connection Info
         run: |
@@ -136,10 +141,8 @@ jobs:
           echo "║  Password     : $REMOTE_PASSWORD"
           echo "╚══════════════════════════════════════════════╝"
           echo ""
-          echo "TigerVNC: open TigerVNC → type $TAILSCALE_IP:5900 → connect"
-          echo "SSH:      ssh RemoteUser@$TAILSCALE_IP"
-          echo ""
-          echo "Make sure YOUR machine is also connected to Tailscale!"
+          echo "TigerVNC → $TAILSCALE_IP:5900 → password from above"
+          echo "Make sure Tailscale is running on YOUR machine too!"
           echo "Cancel this workflow when done."
 
       - name: Keep Alive
