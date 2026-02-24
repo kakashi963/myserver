@@ -98,27 +98,44 @@ jobs:
         run: |
           sudo mkdir -p /var/lib/tailscale
 
+          # Start tailscaled in background
           sudo tailscaled \
             --state=/var/lib/tailscale/tailscaled.state \
             --tun=userspace-networking &
-          sleep 8
+          TAILSCALED_PID=$!
+          
+          # Wait for daemon to be ready
+          echo "Waiting for tailscaled to start..."
+          for i in {1..15}; do
+            if sudo tailscale status --json >/dev/null 2>&1; then
+              echo "tailscaled is ready"
+              break
+            fi
+            echo "Waiting... ($i/15)"
+            sleep 2
+          done
 
+          # Login with auth key (non-interactive)
+          echo "Authenticating with Tailscale..."
           sudo tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=gh-mac-$GITHUB_RUN_ID \
             --accept-routes \
-            --accept-dns=false
+            --accept-dns=false \
+            --force-reauth
 
           # Wait for IP
+          echo "Waiting for IP address..."
           for i in {1..30}; do
             TS_IP=$(sudo tailscale ip -4 2>/dev/null | head -n1 | tr -d '[:space:]')
             [ -n "$TS_IP" ] && break
             echo "Waiting for Tailscale IP... ($i/30)"
-            sleep 5
+            sleep 3
           done
 
           if [ -z "$TS_IP" ]; then
             echo "❌ Failed to get Tailscale IP"
+            echo "Tailscale status:"
             sudo tailscale status
             exit 1
           fi
