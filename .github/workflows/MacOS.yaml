@@ -1,4 +1,4 @@
-name: macOS Remote Access (RDP)
+name: macOS Remote Access (VNC - Most Reliable)
 
 on:
   workflow_dispatch:
@@ -8,10 +8,16 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 355
 
+    env:
+      # Force color output and GUI rendering
+      FORCE_COLOR: "1"
+      CLICOLOR_FORCE: "1"
+
     steps:
       - name: Enable SSH
         run: |
           sudo systemsetup -setremotelogin on
+          sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
           echo "✅ SSH enabled"
 
       - name: Create Remote User
@@ -32,56 +38,60 @@ jobs:
           echo "REMOTE_PASSWORD=$PASSWORD" >> $GITHUB_ENV
           echo "✅ User RemoteUser created"
 
-      - name: Install XQuartz + xrdp dependencies
+      - name: Configure Display & Prevent Sleep
         run: |
-          # Install xquartz for display, xrdp for RDP server
-          brew install xquartz 2>/dev/null || true
-          brew install xrdp 2>/dev/null || true
+          # Prevent display sleep
+          sudo pmset -a displaysleepnever 1
+          sudo pmset -a sleep 0
+          sudo pmset -a autopoweroff 0
+          sudo pmset -a standby 0
+          
+          # Enable virtual display rendering
+          sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutionEnabled -bool true
+          
+          echo "✅ Display configured"
 
-          # If xrdp not in brew, build from source via a known tap
-          if ! command -v xrdp &>/dev/null; then
-            echo "xrdp not found via brew, trying alternative..."
-            brew install neutrinolabs/xrdp/xrdp 2>/dev/null || true
+      - name: Enable Screen Sharing (VNC)
+        run: |
+          # Completely reset and configure Screen Sharing
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -deactivate -stop 2>/dev/null || true
+          sleep 3
+
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure -access -on \
+            -configure -allowAccessFor -allUsers \
+            -configure -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -setvncpw -vncpw "$REMOTE_PASSWORD" \
+            -restart -agent -verbose
+
+          sleep 5
+          echo "✅ Screen Sharing enabled"
+
+      - name: Initialize GUI Session
+        run: |
+          # Open apps to trigger full GUI rendering
+          open -a Finder 2>/dev/null || true
+          sleep 2
+          
+          open -a "System Settings" 2>/dev/null || open -a "System Preferences" 2>/dev/null || true
+          sleep 3
+
+          # Set wallpaper to ensure desktop renders
+          WALLPAPER=$(ls /System/Library/Desktop Pictures/*.heic 2>/dev/null | head -1)
+          if [ -n "$WALLPAPER" ]; then
+            osascript -e "tell application \"Finder\" to set desktop picture to POSIX file \"$WALLPAPER\"" 2>/dev/null || true
           fi
-
-          echo "✅ Packages installed"
+          
+          sleep 2
+          echo "✅ GUI session initialized"
 
       - name: Install Tailscale
         run: |
           brew install tailscale
-          echo "✅ Tailscale installed: $(tailscale version)"
-
-      - name: Configure and Start xrdp
-        run: |
-          # Find xrdp sbin path
-          XRDP_BIN=$(which xrdp 2>/dev/null || find /usr/local /opt/homebrew -name "xrdp" -type f 2>/dev/null | head -1)
-
-          if [ -z "$XRDP_BIN" ]; then
-            echo "❌ xrdp binary not found"
-            exit 1
-          fi
-
-          echo "xrdp found at: $XRDP_BIN"
-
-          # Get config dir
-          XRDP_ETC=$(dirname $(dirname $XRDP_BIN))/etc/xrdp
-          [ ! -d "$XRDP_ETC" ] && XRDP_ETC=/usr/local/etc/xrdp
-          [ ! -d "$XRDP_ETC" ] && XRDP_ETC=/opt/homebrew/etc/xrdp
-
-          echo "xrdp config at: $XRDP_ETC"
-
-          # Start xrdp
-          sudo "$XRDP_BIN" 2>/dev/null &
-          sleep 5
-
-          # Start xrdp-sesman (session manager)
-          SESMAN_BIN=$(which xrdp-sesman 2>/dev/null || find /usr/local /opt/homebrew -name "xrdp-sesman" -type f 2>/dev/null | head -1)
-          if [ -n "$SESMAN_BIN" ]; then
-            sudo "$SESMAN_BIN" 2>/dev/null &
-            sleep 3
-          fi
-
-          echo "✅ xrdp started"
+          echo "✅ Tailscale installed"
 
       - name: Start Tailscale
         run: |
@@ -98,49 +108,74 @@ jobs:
             --accept-routes \
             --accept-dns=false
 
-          TS_IP=""
-          RETRIES=0
-          while [ -z "$TS_IP" ] && [ "$RETRIES" -lt 30 ]; do
+          # Wait for IP
+          for i in {1..30}; do
             TS_IP=$(sudo tailscale ip -4 2>/dev/null | head -n1 | tr -d '[:space:]')
-            [ -z "$TS_IP" ] && echo "Waiting... ($((RETRIES+1))/30)" && sleep 5
-            RETRIES=$((RETRIES+1))
+            [ -n "$TS_IP" ] && break
+            echo "Waiting for Tailscale IP... ($i/30)"
+            sleep 5
           done
 
           if [ -z "$TS_IP" ]; then
-            echo "❌ Could not get Tailscale IP"
+            echo "❌ Failed to get Tailscale IP"
+            sudo tailscale status
             exit 1
           fi
 
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
           echo "✅ Tailscale IP: $TS_IP"
 
-      - name: Verify Ports
+      - name: Verify Services
         run: |
-          nc -z -G5 "$TAILSCALE_IP" 3389 && echo "✅ RDP :3389 OPEN" || echo "⚠️  RDP :3389 not open yet"
-          nc -z -G5 "$TAILSCALE_IP" 22   && echo "✅ SSH :22   OPEN" || echo "⚠️  SSH :22   not open"
+          echo "Checking VNC (5900)..."
+          sudo lsof -i :5900 2>/dev/null && echo "✅ VNC listening" || echo "⚠️ VNC not listening"
+          
+          echo "Checking SSH (22)..."
+          sudo lsof -i :22 2>/dev/null && echo "✅ SSH listening" || echo "⚠️ SSH not listening"
+          
+          echo "Network interfaces:"
+          ifconfig | grep -A1 "utun" 2>/dev/null || true
 
       - name: Connection Info
         run: |
-          echo ""
-          echo "╔══════════════════════════════════════════════╗"
-          echo "║     macOS REMOTE ACCESS READY (RDP)          ║"
-          echo "╠══════════════════════════════════════════════╣"
-          echo "║  Tailscale IP : $TAILSCALE_IP"
-          echo "║  RDP Address  : $TAILSCALE_IP:3389"
-          echo "║  SSH Address  : ssh RemoteUser@$TAILSCALE_IP"
-          echo "║  Username     : RemoteUser"
-          echo "║  Password     : $REMOTE_PASSWORD"
-          echo "╚══════════════════════════════════════════════╝"
-          echo ""
-          echo "Windows: Start → Remote Desktop Connection → $TAILSCALE_IP"
-          echo "OR download Microsoft Remote Desktop from Microsoft Store"
-          echo ""
-          echo "Make sure Tailscale is running on YOUR machine!"
-          echo "Cancel this workflow when done."
+          cat << EOF
+
+          ╔════════════════════════════════════════════════════════╗
+          ║           macOS REMOTE ACCESS READY                    ║
+          ╠════════════════════════════════════════════════════════╣
+          ║  Tailscale IP: $TAILSCALE_IP"
+          echo "║  VNC Address: $TAILSCALE_IP:5900"
+          echo "║  Username:   RemoteUser"
+          echo "║  Password:   $REMOTE_PASSWORD"
+          echo "╠════════════════════════════════════════════════════════╣"
+          ║  HOW TO CONNECT (Windows):                                   ║
+          ║  1. Install Tailscale on YOUR PC: https://tailscale.com      ║
+          ║  2. Login with same account                                  ║
+          ║  3. Install TigerVNC Viewer: https://tigervnc.org            ║
+          ║  4. Connect to: $TAILSCALE_IP:5900"
+          echo "║  5. Enter password when prompted                       ║
+          ╚════════════════════════════════════════════════════════╝
+
+          ⚠️  If you see a black screen:
+             - Wait 10-15 seconds after connecting
+             - Try refreshing/reconnecting once
+             - The GUI may take time to initialize
+
+          Cancel this workflow when done to stop remote access.
+          EOF
 
       - name: Keep Alive
         run: |
+          echo "Session started at $(date)"
           while true; do
-            echo "[$(date)] Session active — cancel workflow to terminate"
+            # Keep GUI active
+            open -a Finder 2>/dev/null || true
+            
+            # Log heartbeat
+            echo "[$(date)] Session active — Tailscale IP: $TAILSCALE_IP"
+            
+            # Check VNC is still running
+            sudo lsof -i :5900 >/dev/null 2>&1 || echo "⚠️  WARNING: VNC port closed!"
+            
             sleep 60
           done
