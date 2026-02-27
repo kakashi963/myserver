@@ -1,199 +1,46 @@
-name: macOS Remote Access (VNC - Most Reliable)
+name: MacRDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  macos-remote:
+  build:
+    name: MacRDP
     runs-on: macos-latest
-    timeout-minutes: 355
-
-    env:
-      # Force color output and GUI rendering
-      FORCE_COLOR: "1"
-      CLICOLOR_FORCE: "1"
 
     steps:
-      - name: Enable SSH
-        run: |
-          sudo systemsetup -setremotelogin on
-          sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
-          echo "✅ SSH enabled"
 
-      - name: Create Remote User
-        run: |
-          PASSWORD=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 20)
+    - name: Connect to Tailscale
+      uses: tailscale/github-action@v4
+      with:
+        oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+        oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+        tags: tag:ci
 
-          sudo dscl . -delete /Users/RemoteUser 2>/dev/null || true
-          sudo dscl . -create /Users/RemoteUser
-          sudo dscl . -create /Users/RemoteUser UserShell /bin/zsh
-          sudo dscl . -create /Users/RemoteUser RealName "Remote User"
-          sudo dscl . -create /Users/RemoteUser UniqueID "601"
-          sudo dscl . -create /Users/RemoteUser PrimaryGroupID "20"
-          sudo dscl . -create /Users/RemoteUser NFSHomeDirectory /Users/RemoteUser
-          sudo dscl . -passwd /Users/RemoteUser "$PASSWORD"
-          sudo dscl . -append /Groups/admin GroupMembership RemoteUser
-          sudo createhomedir -c -u RemoteUser 2>/dev/null || true
+    - name: Enable Screen Sharing (VNC)
+      run: |
+        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -activate -configure -access -on \
+          -clientopts -setvnclegacy -vnclegacy yes \
+          -clientopts -setvncpwd -vncpwd yourpassword \
+          -restart -agent -privs -all
 
-          echo "REMOTE_PASSWORD=$PASSWORD" >> $GITHUB_ENV
-          echo "✅ User RemoteUser created"
+    - name: Enable SSH
+      run: |
+        sudo systemsetup -setremotelogin on
 
-      - name: Configure Display & Prevent Sleep
-        run: |
-          # Prevent display sleep (correct pmset syntax)
-          sudo pmset -a sleep 0
-          sudo pmset -a displaysleep 0
-          sudo pmset -a autopoweroff 0
-          sudo pmset -a standby 0
-          sudo pmset -a powernap 0
-          
-          # Enable virtual display rendering
-          sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutionEnabled -bool true
-          
-          echo "✅ Display configured"
+    - name: Show Tailscale IP & Login Info
+      run: |
+        echo "===== Tailscale IP ====="
+        tailscale ip -4
+        echo "===== VNC Connection ====="
+        echo "VNC Host: $(tailscale ip -4)"
+        echo "VNC Port: 5900"
+        echo "VNC Password: yourpassword"
+        echo "===== SSH Connection ====="
+        echo "SSH: ssh runner@$(tailscale ip -4)"
+        echo "macOS User: runner"
 
-      - name: Enable Screen Sharing (VNC)
-        run: |
-          # Completely reset and configure Screen Sharing
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -deactivate -stop 2>/dev/null || true
-          sleep 3
-
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -access -on \
-            -configure -allowAccessFor -allUsers \
-            -configure -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -setvncpw -vncpw "$REMOTE_PASSWORD" \
-            -restart -agent -verbose
-
-          sleep 5
-          echo "✅ Screen Sharing enabled"
-
-      - name: Initialize GUI Session
-        run: |
-          # Open apps to trigger full GUI rendering
-          open -a Finder 2>/dev/null || true
-          sleep 2
-          
-          open -a "System Settings" 2>/dev/null || open -a "System Preferences" 2>/dev/null || true
-          sleep 3
-
-          # Set wallpaper to ensure desktop renders
-          WALLPAPER=$(ls /System/Library/Desktop Pictures/*.heic 2>/dev/null | head -1)
-          if [ -n "$WALLPAPER" ]; then
-            osascript -e "tell application \"Finder\" to set desktop picture to POSIX file \"$WALLPAPER\"" 2>/dev/null || true
-          fi
-          
-          sleep 2
-          echo "✅ GUI session initialized"
-
-      - name: Install Tailscale
-        run: |
-          brew install tailscale
-          echo "✅ Tailscale installed"
-
-      - name: Start Tailscale
-        run: |
-          sudo mkdir -p /var/lib/tailscale
-
-          # Start tailscaled in background
-          sudo tailscaled \
-            --state=/var/lib/tailscale/tailscaled.state \
-            --tun=userspace-networking &
-          TAILSCALED_PID=$!
-          
-          # Wait for daemon to be ready
-          echo "Waiting for tailscaled to start..."
-          for i in {1..15}; do
-            if sudo tailscale status --json >/dev/null 2>&1; then
-              echo "tailscaled is ready"
-              break
-            fi
-            echo "Waiting... ($i/15)"
-            sleep 2
-          done
-
-          # Login with auth key (non-interactive)
-          echo "Authenticating with Tailscale..."
-          sudo tailscale up \
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=gh-mac-$GITHUB_RUN_ID \
-            --accept-routes \
-            --accept-dns=false \
-            --force-reauth
-
-          # Wait for IP
-          echo "Waiting for IP address..."
-          for i in {1..30}; do
-            TS_IP=$(sudo tailscale ip -4 2>/dev/null | head -n1 | tr -d '[:space:]')
-            [ -n "$TS_IP" ] && break
-            echo "Waiting for Tailscale IP... ($i/30)"
-            sleep 3
-          done
-
-          if [ -z "$TS_IP" ]; then
-            echo "❌ Failed to get Tailscale IP"
-            echo "Tailscale status:"
-            sudo tailscale status
-            exit 1
-          fi
-
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          echo "✅ Tailscale IP: $TS_IP"
-
-      - name: Verify Services
-        run: |
-          echo "Checking VNC (5900)..."
-          sudo lsof -i :5900 2>/dev/null && echo "✅ VNC listening" || echo "⚠️ VNC not listening"
-          
-          echo "Checking SSH (22)..."
-          sudo lsof -i :22 2>/dev/null && echo "✅ SSH listening" || echo "⚠️ SSH not listening"
-          
-          echo "Network interfaces:"
-          ifconfig | grep -A1 "utun" 2>/dev/null || true
-
-      - name: Connection Info
-        run: |
-          cat << EOF
-
-          ╔════════════════════════════════════════════════════════╗
-          ║           macOS REMOTE ACCESS READY                    ║
-          ╠════════════════════════════════════════════════════════╣
-          ║  Tailscale IP: $TAILSCALE_IP"
-          echo "║  VNC Address: $TAILSCALE_IP:5900"
-          echo "║  Username:   RemoteUser"
-          echo "║  Password:   $REMOTE_PASSWORD"
-          echo "╠════════════════════════════════════════════════════════╣"
-          ║  HOW TO CONNECT (Windows):                                   ║
-          ║  1. Install Tailscale on YOUR PC: https://tailscale.com      ║
-          ║  2. Login with same account                                  ║
-          ║  3. Install TigerVNC Viewer: https://tigervnc.org            ║
-          ║  4. Connect to: $TAILSCALE_IP:5900"
-          echo "║  5. Enter password when prompted                       ║
-          ╚════════════════════════════════════════════════════════╝
-
-          ⚠️  If you see a black screen:
-             - Wait 10-15 seconds after connecting
-             - Try refreshing/reconnecting once
-             - The GUI may take time to initialize
-
-          Cancel this workflow when done to stop remote access.
-          EOF
-
-      - name: Keep Alive
-        run: |
-          echo "Session started at $(date)"
-          while true; do
-            # Keep GUI active
-            open -a Finder 2>/dev/null || true
-            
-            # Log heartbeat
-            echo "[$(date)] Session active — Tailscale IP: $TAILSCALE_IP"
-            
-            # Check VNC is still running
-            sudo lsof -i :5900 >/dev/null 2>&1 || echo "⚠️  WARNING: VNC port closed!"
-            
-            sleep 60
-          done
+    - name: macOS System Running...
+      run: |
+        sleep 21600
