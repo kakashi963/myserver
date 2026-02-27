@@ -13,9 +13,7 @@ jobs:
     - name: Connect to Tailscale
       uses: tailscale/github-action@v4
       with:
-        oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-        oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-        tags: tag:ci
+        authkey: ${{ secrets.TALESCALE_AUTH_KEY }}
 
     - name: Enable Screen Sharing (VNC)
       run: |
@@ -29,18 +27,16 @@ jobs:
       run: |
         sudo systemsetup -setremotelogin on
 
-    - name: Show Tailscale IP & Login Info
+    - name: Log In Details To VNC Server
       run: |
         echo "===== Tailscale IP ====="
         tailscale ip -4
         echo "===== VNC Connection ====="
-        echo "VNC Host: $(tailscale ip -4)"
-        echo "VNC Port: 5900"
-        echo "VNC Password: yourpassword"
+        echo "Host: $(tailscale ip -4)"
+        echo "Port: 5900"
+        echo "Password: yourpassword"
         echo "===== SSH Connection ====="
         echo "SSH: ssh runner@$(tailscale ip -4)"
-        echo "macOS User: runner"
 
     - name: macOS System Running...
-      run: |
-        sleep 21600
+      run: sleep 21600
