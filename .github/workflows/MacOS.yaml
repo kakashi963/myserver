@@ -12,25 +12,34 @@ jobs:
       - name: Prepare Environment
         run: |
           echo "🏁 Starting macOS remote session setup"
-          echo "--- macOS Version ---"
           sw_vers
-          echo "--- Current User ---"
-          whoami
-          id
-          echo "--- System Info ---"
+          whoami && id
           uname -a
-          echo "--- Disk Space ---"
           df -h /
 
       - name: Set runner User Password
         run: |
           echo "🔐 Setting runner user password..."
-          sudo dscl . -passwd /Users/runner macvncpass
-          echo "✅ runner password set to: macvncpass"
 
-          echo "--- Verify runner user ---"
-          dscl . -read /Users/runner UserShell
-          id runner
+          # Method 1: sysadminctl (best method, no old password needed)
+          sudo sysadminctl -resetPasswordFor runner -newPassword macvncpass 2>&1 && \
+            echo "✅ sysadminctl succeeded" || echo "⚠️ sysadminctl failed, trying fallback..."
+
+          # Method 2: expect + passwd fallback
+          which expect || brew install expect
+          sudo expect -c '
+            spawn passwd runner
+            expect "New password:"
+            send "macvncpass\r"
+            expect "Retype new password:"
+            send "macvncpass\r"
+            expect eof
+          ' 2>&1 || echo "⚠️ expect fallback also failed"
+
+          # Verify
+          sudo dscl . -authonly runner macvncpass 2>&1 && \
+            echo "✅ Password verified: macvncpass" || \
+            echo "❌ Password verification failed"
 
       - name: Connect to Tailscale
         run: |
@@ -48,7 +57,7 @@ jobs:
           echo "--- tailscaled log ---"
           cat /tmp/tailscaled.log || true
 
-          echo "🔐 Connecting to Tailscale network..."
+          echo "🔐 Connecting to Tailscale..."
           sudo tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=macos-gh-${GITHUB_RUN_ID} \
@@ -89,7 +98,7 @@ jobs:
           if lsof -iTCP:22 -sTCP:LISTEN; then
             echo "✅ SSH listening on port 22"
           else
-            echo "❌ SSH not on port 22"
+            echo "❌ SSH not listening on port 22"
           fi
 
       - name: Enable Screen Sharing (VNC)
@@ -108,8 +117,10 @@ jobs:
             -clientopts -setvncpwd -vncpwd "macvncpass" \
             -restart -agent -privs -all 2>&1 || true
 
-          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>&1 || true
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>&1 || true
+          sudo launchctl unload \
+            /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>&1 || true
+          sudo launchctl load -w \
+            /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>&1 || true
 
           sleep 5
 
@@ -130,11 +141,12 @@ jobs:
           echo "--- Tailscale status ---"
           sudo tailscale status 2>&1 || true
 
-          echo "--- Tailscale IP ---"
-          sudo tailscale ip -4 || true
-
           echo "--- ARD / VNC processes ---"
           ps aux | grep -iE "vnc|ard|screensharing" | grep -v grep || true
+
+          echo "--- runner user info ---"
+          id runner || true
+          sudo dscl . -read /Users/runner UserShell || true
 
       - name: Show Connection Details
         run: |
@@ -153,7 +165,6 @@ jobs:
           echo "  RealVNC         : $TS_IP:5900"
           echo "  SSH             : ssh runner@$TS_IP"
           echo "======================================="
-          echo ""
 
       - name: Maintain Session
         run: |
@@ -163,8 +174,10 @@ jobs:
 
             if ! lsof -iTCP:5900 -sTCP:LISTEN > /dev/null 2>&1; then
               echo "⚠️  VNC dropped, restarting..."
-              sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
-              sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
+              sudo launchctl unload \
+                /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
+              sudo launchctl load -w \
+                /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
               sleep 5
               lsof -iTCP:5900 -sTCP:LISTEN && echo "✅ VNC back up" || echo "❌ VNC still down"
             fi
