@@ -19,29 +19,36 @@ jobs:
           id
           echo "--- System Info ---"
           uname -a
-          echo "--- Working Directory ---"
-          pwd
           echo "--- Disk Space ---"
           df -h /
+
+      - name: Set runner User Password
+        run: |
+          echo "🔐 Setting runner user password..."
+          sudo dscl . -passwd /Users/runner macvncpass
+          echo "✅ runner password set to: macvncpass"
+
+          echo "--- Verify runner user ---"
+          dscl . -read /Users/runner UserShell
+          id runner
 
       - name: Connect to Tailscale
         run: |
           set -e
 
-          echo "🔍 Checking if tailscaled is available..."
-          which tailscaled || { echo "❌ tailscaled not found, installing..."; brew install tailscale; }
-          which tailscale || echo "❌ tailscale CLI not found"
+          echo "🔍 Checking tailscale binary..."
+          which tailscaled || brew install tailscale
 
           echo "🔑 Starting tailscaled daemon..."
-          sudo tailscaled --state=/tmp/tailscaled.state --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
-          TAILSCALED_PID=$!
-          echo "tailscaled PID: $TAILSCALED_PID"
+          sudo tailscaled \
+            --state=/tmp/tailscaled.state \
+            --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
           sleep 6
 
           echo "--- tailscaled log ---"
           cat /tmp/tailscaled.log || true
 
-          echo "🔐 Running tailscale up..."
+          echo "🔐 Connecting to Tailscale network..."
           sudo tailscale up \
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
             --hostname=macos-gh-${GITHUB_RUN_ID} \
@@ -65,10 +72,8 @@ jobs:
           done
 
           if [ -z "$TS_IP" ]; then
-            echo "❌ Failed to get Tailscale IP after retries"
-            echo "--- tailscale status ---"
+            echo "❌ Failed to get Tailscale IP"
             sudo tailscale status || true
-            echo "--- tailscaled log (final) ---"
             cat /tmp/tailscaled.log || true
             exit 1
           fi
@@ -78,61 +83,46 @@ jobs:
         run: |
           echo "🔧 Enabling SSH..."
           sudo systemsetup -setremotelogin on 2>&1 || true
-          sleep 2
+          sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>&1 || true
+          sleep 3
 
-          echo "--- SSH config ---"
-          sudo cat /etc/ssh/sshd_config | grep -E "PermitRoot|PasswordAuth|PubkeyAuth" || true
-
-          echo "--- SSH service status ---"
-          sudo launchctl list | grep ssh || true
-
-          echo "--- SSH port check ---"
           if lsof -iTCP:22 -sTCP:LISTEN; then
             echo "✅ SSH listening on port 22"
           else
-            echo "❌ SSH not listening on port 22"
-            echo "--- Attempting manual SSH start ---"
-            sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist || true
-            sleep 3
-            lsof -iTCP:22 -sTCP:LISTEN || echo "❌ SSH still not listening"
+            echo "❌ SSH not on port 22"
           fi
 
       - name: Enable Screen Sharing (VNC)
         run: |
-          echo "🖥  Enabling Screen Sharing / VNC..."
+          echo "🖥  Enabling VNC Screen Sharing..."
 
-          echo "--- Attempting ARD kickstart ---"
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement \
+            VNCLegacyConnectionsAllowed -bool YES
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement \
+            VNCAlwaysStartOnConsole -bool YES
+
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -allowAccessFor -allUsers \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpwd -vncpwd "macvncpass" \
-            -restart -agent -privs -all 2>&1 || echo "⚠️ kickstart returned non-zero, continuing..."
+            -restart -agent -privs -all 2>&1 || true
 
-          echo "--- Setting screen sharing defaults ---"
-          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides \
-            com.apple.screensharing -dict Disabled -bool false 2>&1 || true
-
-          echo "--- Reloading screensharing plist ---"
           sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>&1 || true
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>&1 || true
 
           sleep 5
 
-          echo "--- VNC port check (5900) ---"
           if lsof -iTCP:5900 -sTCP:LISTEN; then
             echo "✅ VNC listening on port 5900"
           else
-            echo "❌ VNC NOT listening on 5900"
-            echo "--- launchctl list (screensharing) ---"
-            sudo launchctl list | grep -i screen || true
-            echo "--- ARD agent status ---"
-            sudo launchctl list | grep -i ard || true
+            echo "❌ VNC not on 5900"
+            sudo launchctl list | grep -iE "screen|ard" || true
           fi
 
       - name: Verify All Services
         run: |
-          echo "====== FULL SERVICE VERIFICATION ======"
+          echo "====== SERVICE VERIFICATION ======"
 
           echo "--- All TCP listeners ---"
           lsof -iTCP -sTCP:LISTEN || true
@@ -143,11 +133,8 @@ jobs:
           echo "--- Tailscale IP ---"
           sudo tailscale ip -4 || true
 
-          echo "--- Network interfaces ---"
-          ifconfig | grep -E "inet |flags" || true
-
-          echo "--- Running processes (VNC/ARD) ---"
-          ps aux | grep -iE "vnc|ard|screensharing|xrdp" | grep -v grep || true
+          echo "--- ARD / VNC processes ---"
+          ps aux | grep -iE "vnc|ard|screensharing" | grep -v grep || true
 
       - name: Show Connection Details
         run: |
@@ -158,11 +145,13 @@ jobs:
           echo "======================================="
           echo "  Tailscale IP    : $TS_IP"
           echo "  VNC Port        : 5900"
+          echo "  VNC Username    : runner"
           echo "  VNC Password    : macvncpass"
           echo "  SSH User        : runner"
+          echo "  SSH Password    : macvncpass"
           echo "======================================="
-          echo "  VNC Connect     : $TS_IP:5900"
-          echo "  SSH Connect     : ssh runner@$TS_IP"
+          echo "  RealVNC         : $TS_IP:5900"
+          echo "  SSH             : ssh runner@$TS_IP"
           echo "======================================="
           echo ""
 
@@ -173,15 +162,15 @@ jobs:
             echo "[$(date)] ✅ macOS alive — $TS_IP (SSH:22 | VNC:5900)"
 
             if ! lsof -iTCP:5900 -sTCP:LISTEN > /dev/null 2>&1; then
-              echo "⚠️  VNC dropped, attempting restart..."
+              echo "⚠️  VNC dropped, restarting..."
               sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
               sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
               sleep 5
-              lsof -iTCP:5900 -sTCP:LISTEN && echo "✅ VNC restarted" || echo "❌ VNC still down"
+              lsof -iTCP:5900 -sTCP:LISTEN && echo "✅ VNC back up" || echo "❌ VNC still down"
             fi
 
             if ! lsof -iTCP:22 -sTCP:LISTEN > /dev/null 2>&1; then
-              echo "⚠️  SSH dropped, attempting restart..."
+              echo "⚠️  SSH dropped, restarting..."
               sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist || true
             fi
 
