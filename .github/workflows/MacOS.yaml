@@ -40,7 +40,14 @@ jobs:
 
       - name: Set SSH Password
         run: |
-          sudo dscl . -passwd /Users/runner runner123
+          # Use sysadminctl which doesn't require old password
+          sudo sysadminctl -adminUser runner -adminPassword "" -resetPasswordFor runner -newPassword runner123
+          # Also enable password auth in sshd
+          sudo sed -i '' 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i '' 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          echo "PasswordAuthentication yes" | sudo tee -a /etc/ssh/sshd_config
+          sudo launchctl stop com.openssh.sshd
+          sudo launchctl start com.openssh.sshd
           echo "SSH Password set to: runner123"
 
       - name: Show Connection Info
