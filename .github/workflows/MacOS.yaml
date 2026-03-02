@@ -1,24 +1,43 @@
 name: MacRDP
-on: 
+on:
   workflow_dispatch:
+
 jobs:
   build:
     name: MacRDP
     runs-on: macos-latest
-    
-    steps:                 
-    - name: Enabling Remote Access
-      env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-      run: |
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Connect the macOS runner to your Tailnet
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TALESCALE_AUTH_KEY }}
+          tags: tag:ci
+
+      # Enable Remote Management / VNC
+      - name: Enabling Remote Access (VNC)
+        run: |
           curl -s -o start.sh -L "https://raw.githubusercontent.com/JohnnyNetsec/github-vm/main/mac/start.sh"
           chmod +x start.sh
-          bash start.sh "$NGROK_AUTH_TOKEN"
-          
-    - name: Log In Details To VNC Server
-      run: |
-         chmod +x login.sh
-         bash login.sh
-         
-    - name: MacOS System running...
-      uses: mxschmitt/action-tmate@v2
+          ./start.sh dummy-token || true
+
+      # Show VNC login details + Tailscale IP
+      - name: Log In Details To VNC Server
+        run: |
+          curl -s -o login.sh -L "https://raw.githubusercontent.com/JohnnyNetsec/github-vm/main/mac/login.sh" || true
+          chmod +x login.sh 2>/dev/null || true
+          [ -f login.sh ] && ./login.sh || echo "login.sh not found"
+          echo "Tailscale IPv4 addresses:"
+          tailscale ip
+          echo "Hostname:"
+          hostname
+
+      # Interactive shell via tmate
+      - name: MacOS System running...
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
