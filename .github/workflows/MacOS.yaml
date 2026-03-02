@@ -40,8 +40,7 @@ jobs:
 
       - name: Set SSH Password
         run: |
-          # Set password for runner user
-          echo "runner:runner123" | sudo chpasswd
+          sudo dscl . -passwd /Users/runner runner123
           echo "SSH Password set to: runner123"
 
       - name: Show Connection Info
