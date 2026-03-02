@@ -38,32 +38,26 @@ jobs:
           
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
-      - name: Set SSH Password
+      - name: Inject SSH Key
         run: |
-          # Use sysadminctl which doesn't require old password
-          sudo sysadminctl -adminUser runner -adminPassword "" -resetPasswordFor runner -newPassword runner123
-          # Also enable password auth in sshd
-          sudo sed -i '' 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i '' 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          echo "PasswordAuthentication yes" | sudo tee -a /etc/ssh/sshd_config
-          sudo launchctl stop com.openssh.sshd
-          sudo launchctl start com.openssh.sshd
-          echo "SSH Password set to: runner123"
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" >> ~/.ssh/authorized_keys
+          chmod 700 ~/.ssh
+          chmod 600 ~/.ssh/authorized_keys
 
       - name: Show Connection Info
         run: |
           echo ""
           echo "=== SSH ACCESS ==="
-          echo "IP: $TAILSCALE_IP"
+          echo "Address: $TAILSCALE_IP"
           echo "User: runner"
-          echo "Password: runner123"
-          echo "Command: ssh runner@$TAILSCALE_IP"
+          echo "Command: ssh -i C:\Users\kavun\macos_runner runner@$TAILSCALE_IP"
           echo "=================="
           echo ""
 
       - name: Keep Alive
         run: |
           while true; do
-            echo "[$(date)] Runner active"
+            echo "[$(date)] SSH Active - Cancel workflow to terminate"
             sleep 300
           done
