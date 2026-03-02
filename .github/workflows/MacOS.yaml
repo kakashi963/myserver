@@ -12,44 +12,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Enable VNC (Screen Sharing)
-        run: |
-          # Enable screen sharing via registry only (no kickstart)
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
-          
-          # Generate random VNC password
-          PASSWORD=$(cat /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 12)
-          
-          # Set VNC password directly via python
-          python3 -c "
-          import subprocess, hashlib
-          pwd = '$PASSWORD'
-          result = subprocess.run(['sudo', 'defaults', 'write', 
-            '/Library/Preferences/com.apple.RemoteManagement',
-            'VNCLegacyConnectionsEnabled', '-bool', 'true'])
-          "
-          
-          # Set password using builtin tool (non-blocking)
-          echo "$PASSWORD" | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
-          
-          echo "VNC_PASSWORD=$PASSWORD" >> $GITHUB_ENV
-
-      - name: Create VNC User
-        run: |
-          USERNAME="macrdp"
-          PASSWORD=$(cat /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 12)
-          
-          sudo dscl . -create /Users/$USERNAME
-          sudo dscl . -create /Users/$USERNAME UserShell /bin/bash
-          sudo dscl . -create /Users/$USERNAME RealName "Mac RDP User"
-          sudo dscl . -create /Users/$USERNAME UniqueID 1001
-          sudo dscl . -create /Users/$USERNAME PrimaryGroupID 80
-          sudo dscl . -create /Users/$USERNAME NFSHomeDirectory /Users/$USERNAME
-          sudo dscl . -passwd /Users/$USERNAME "$PASSWORD"
-          sudo dscl . -append /Groups/admin GroupMembership $USERNAME
-          
-          echo "VNC_CREDS=User: $USERNAME | Password: $PASSWORD" >> $GITHUB_ENV
-
       - name: Install Tailscale
         run: |
           brew install tailscale
@@ -76,18 +38,16 @@ jobs:
           
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
-      - name: Maintain Connection
+      - name: Show Connection Info
         run: |
-          echo ""
-          echo "=== VNC ACCESS ==="
-          echo "Address: $TAILSCALE_IP"
-          echo "Credentials: $VNC_CREDS"
-          echo "VNC Password: $VNC_PASSWORD"
-          echo "Port: 5900"
-          echo "=================="
-          echo ""
-          
+          echo "=== ACCESS INFO ==="
+          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "Hostname: $(hostname)"
+          echo "==================="
+
+      - name: Keep Alive
+        run: |
           while true; do
-            echo "[$(date)] VNC Active - Cancel workflow to terminate"
+            echo "[$(date)] Runner active"
             sleep 300
           done
