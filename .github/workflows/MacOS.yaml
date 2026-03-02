@@ -1,110 +1,39 @@
-name: MacRDP
-on:
-  workflow_dispatch:
-
-jobs:
-  build:
-    name: MacRDP
-    runs-on: macos-latest
-    timeout-minutes: 3600
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Enable VNC (Screen Sharing)
-        run: |
-          # Enable Screen Sharing (VNC)
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
-          
-          # Set VNC password
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement.plist VNCLegacyConnectionsEnabled -bool true
-          
-          # Generate random password
-          PASSWORD=$(cat /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9@#$%' | head -c 16)
-          
-          # Set the VNC password
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpwd -vncpwd "$PASSWORD" \
-            -restart -agent -privs -all
-          
-          echo "VNC_PASSWORD=$PASSWORD" >> $GITHUB_ENV
-
-      - name: Create VNC User
-        run: |
-          USERNAME="macrdp"
-          PASSWORD=$(cat /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9@#$%' | head -c 16)
-          
-          # Create user
-          sudo dscl . -create /Users/$USERNAME
-          sudo dscl . -create /Users/$USERNAME UserShell /bin/bash
-          sudo dscl . -create /Users/$USERNAME RealName "Mac RDP User"
-          sudo dscl . -create /Users/$USERNAME UniqueID 1001
-          sudo dscl . -create /Users/$USERNAME PrimaryGroupID 80
-          sudo dscl . -create /Users/$USERNAME NFSHomeDirectory /Users/$USERNAME
-          sudo dscl . -passwd /Users/$USERNAME "$PASSWORD"
-          
-          # Add to admin group
-          sudo dscl . -append /Groups/admin GroupMembership $USERNAME
-          
-          echo "VNC_CREDS=User: $USERNAME | Password: $PASSWORD" >> $GITHUB_ENV
-
-      - name: Install Tailscale
-        run: |
-          brew install tailscale
-
-      - name: Connect Tailscale
-        run: |
-          # Start tailscaled daemon
-          sudo tailscaled &
-          sleep 5
-          
-          # Connect using auth key
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=macos-runner-$GITHUB_RUN_ID
-          
-          # Wait for IP assignment
-          TS_IP=""
-          RETRIES=0
-          while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
-            TS_IP=$(tailscale ip -4)
-            sleep 5
-            RETRIES=$((RETRIES + 1))
-          done
-          
-          if [ -z "$TS_IP" ]; then
-            echo "Tailscale IP not assigned. Exiting."
-            exit 1
-          fi
-          
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-
-      - name: Verify VNC Accessibility
-        run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
-          
-          # Test port 5900 (VNC)
-          nc -zv $TAILSCALE_IP 5900
-          if [ $? -ne 0 ]; then
-            echo "VNC port 5900 not reachable"
-            exit 1
-          fi
-          echo "VNC port 5900 is accessible!"
-
-      - name: Maintain Connection
-        run: |
-          echo ""
-          echo "=== VNC ACCESS ==="
-          echo "Address: $TAILSCALE_IP"
-          echo "Credentials: $VNC_CREDS"
-          echo "VNC Password: $VNC_PASSWORD"
-          echo "Port: 5900"
-          echo "=================="
-          echo ""
-          
-          # Keep runner alive
-          while true; do
-            echo "[$(date)] VNC Active - Cancel workflow to terminate"
-            sleep 300
-          done
+Run actions/checkout@v4
+Syncing repository: kakashi963/myserver
+Getting Git version info
+Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/22f84db5-871e-4838-97c0-7a1e3ccbfb87/.gitconfig'
+Temporarily overriding HOME='/Users/runner/work/_temp/22f84db5-871e-4838-97c0-7a1e3ccbfb87' before making global git config changes
+Adding repository directory to the temporary git global config as a safe directory
+/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/myserver/myserver
+Deleting the contents of '/Users/runner/work/myserver/myserver'
+Initializing the repository
+Disabling automatic garbage collection
+Setting up auth
+Fetching the repository
+Determining the checkout info
+/opt/homebrew/bin/git sparse-checkout disable
+/opt/homebrew/bin/git config --local --unset-all extensions.worktreeConfig
+Checking out the ref
+/opt/homebrew/bin/git log -1 --format=%H
+d4a4931177a215c426cf4ce0df6848ef719b21c0
+2m 44s
+Run # Enable Screen Sharing (VNC)
+  # Enable Screen Sharing (VNC)
+  sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+  
+  # Set VNC password
+  sudo defaults write /Library/Preferences/com.apple.RemoteManagement.plist VNCLegacyConnectionsEnabled -bool true
+  
+  # Generate random password
+  PASSWORD=$(cat /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9@#$%' | head -c 16)
+  
+  # Set the VNC password
+  sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+    -activate -configure -access -on \
+    -clientopts -setvnclegacy -vnclegacy yes \
+    -clientopts -setvncpwd -vncpwd "$PASSWORD" \
+    -restart -agent -privs -all
+  
+  echo "VNC_PASSWORD=$PASSWORD" >> $GITHUB_ENV
+  shell: /bin/bash -e {0}
+  
