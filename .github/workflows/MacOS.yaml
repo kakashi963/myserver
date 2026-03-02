@@ -38,12 +38,22 @@ jobs:
           
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
+      - name: Set SSH Password
+        run: |
+          # Set password for runner user
+          echo "runner:runner123" | sudo chpasswd
+          echo "SSH Password set to: runner123"
+
       - name: Show Connection Info
         run: |
-          echo "=== ACCESS INFO ==="
-          echo "Tailscale IP: $TAILSCALE_IP"
-          echo "Hostname: $(hostname)"
-          echo "==================="
+          echo ""
+          echo "=== SSH ACCESS ==="
+          echo "IP: $TAILSCALE_IP"
+          echo "User: runner"
+          echo "Password: runner123"
+          echo "Command: ssh runner@$TAILSCALE_IP"
+          echo "=================="
+          echo ""
 
       - name: Keep Alive
         run: |
