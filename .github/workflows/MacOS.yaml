@@ -6,38 +6,105 @@ jobs:
   build:
     name: MacRDP
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 3600
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Connect the macOS runner to your Tailnet
+      - name: Enable VNC (Screen Sharing)
+        run: |
+          # Enable Screen Sharing (VNC)
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+          
+          # Set VNC password
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement.plist VNCLegacyConnectionsEnabled -bool true
+          
+          # Generate random password
+          PASSWORD=$(cat /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9@#$%' | head -c 16)
+          
+          # Set the VNC password
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpwd -vncpwd "$PASSWORD" \
+            -restart -agent -privs -all
+          
+          echo "VNC_PASSWORD=$PASSWORD" >> $GITHUB_ENV
+
+      - name: Create VNC User
+        run: |
+          USERNAME="macrdp"
+          PASSWORD=$(cat /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9@#$%' | head -c 16)
+          
+          # Create user
+          sudo dscl . -create /Users/$USERNAME
+          sudo dscl . -create /Users/$USERNAME UserShell /bin/bash
+          sudo dscl . -create /Users/$USERNAME RealName "Mac RDP User"
+          sudo dscl . -create /Users/$USERNAME UniqueID 1001
+          sudo dscl . -create /Users/$USERNAME PrimaryGroupID 80
+          sudo dscl . -create /Users/$USERNAME NFSHomeDirectory /Users/$USERNAME
+          sudo dscl . -passwd /Users/$USERNAME "$PASSWORD"
+          
+          # Add to admin group
+          sudo dscl . -append /Groups/admin GroupMembership $USERNAME
+          
+          echo "VNC_CREDS=User: $USERNAME | Password: $PASSWORD" >> $GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          brew install tailscale
+
       - name: Connect Tailscale
-        uses: tailscale/github-action@v2
-        with:
-          authkey: ${{ secrets.TALESCALE_AUTH_KEY }}
-          tags: tag:ci
-
-      # Enable Remote Management / VNC
-      - name: Enabling Remote Access (VNC)
         run: |
-          curl -s -o start.sh -L "https://raw.githubusercontent.com/JohnnyNetsec/github-vm/main/mac/start.sh"
-          chmod +x start.sh
-          ./start.sh dummy-token || true
+          # Start tailscaled daemon
+          sudo tailscaled &
+          sleep 5
+          
+          # Connect using auth key
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=macos-runner-$GITHUB_RUN_ID
+          
+          # Wait for IP assignment
+          TS_IP=""
+          RETRIES=0
+          while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
+            TS_IP=$(tailscale ip -4)
+            sleep 5
+            RETRIES=$((RETRIES + 1))
+          done
+          
+          if [ -z "$TS_IP" ]; then
+            echo "Tailscale IP not assigned. Exiting."
+            exit 1
+          fi
+          
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
-      # Show VNC login details + Tailscale IP
-      - name: Log In Details To VNC Server
+      - name: Verify VNC Accessibility
         run: |
-          curl -s -o login.sh -L "https://raw.githubusercontent.com/JohnnyNetsec/github-vm/main/mac/login.sh" || true
-          chmod +x login.sh 2>/dev/null || true
-          [ -f login.sh ] && ./login.sh || echo "login.sh not found"
-          echo "Tailscale IPv4 addresses:"
-          tailscale ip
-          echo "Hostname:"
-          hostname
+          echo "Tailscale IP: $TAILSCALE_IP"
+          
+          # Test port 5900 (VNC)
+          nc -zv $TAILSCALE_IP 5900
+          if [ $? -ne 0 ]; then
+            echo "VNC port 5900 not reachable"
+            exit 1
+          fi
+          echo "VNC port 5900 is accessible!"
 
-      # Interactive shell via tmate
-      - name: MacOS System running...
-        uses: mxschmitt/action-tmate@v3
-        with:
-          limit-access-to-actor: true
+      - name: Maintain Connection
+        run: |
+          echo ""
+          echo "=== VNC ACCESS ==="
+          echo "Address: $TAILSCALE_IP"
+          echo "Credentials: $VNC_CREDS"
+          echo "VNC Password: $VNC_PASSWORD"
+          echo "Port: 5900"
+          echo "=================="
+          echo ""
+          
+          # Keep runner alive
+          while true; do
+            echo "[$(date)] VNC Active - Cancel workflow to terminate"
+            sleep 300
+          done
