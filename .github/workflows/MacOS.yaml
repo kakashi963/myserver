@@ -1,195 +1,24 @@
 name: MacRDP
-
-on:
+on: 
   workflow_dispatch:
-
 jobs:
-  macos-remote:
+  build:
+    name: MacRDP
     runs-on: macos-latest
-    timeout-minutes: 360
-
-    steps:
-      - name: Prepare Environment
-        run: |
-          echo "🏁 Starting macOS remote session"
-          sw_vers
-          whoami && id
-          uname -a
-
-      - name: Generate Secure VNC Password
-        run: |
-          # Generate secure random password (same style as Windows workflow)
-          python3 - << 'PYEOF'
-          import random
-          import string
-          import os
-
-          upper   = list(string.ascii_uppercase)
-          lower   = list(string.ascii_lowercase)
-          digits  = list(string.digits)
-          special = list("!@#$%^&*")
-
-          raw = (
-              random.sample(upper,   3) +
-              random.sample(lower,   3) +
-              random.sample(digits,  2)
-          )
-          # VNC passwords max 8 chars — skip special to stay safe
-          random.shuffle(raw)
-          password = ''.join(raw)
-
-          print(f"Generated VNC password: {password}")
-
-          with open(os.environ['GITHUB_ENV'], 'a') as f:
-              f.write(f"VNC_PASSWORD={password}\n")
-          PYEOF
-
-          echo "✅ Secure VNC password generated"
-
-      - name: Write VNC Password Hash (Direct Binary Method)
-        run: |
-          echo "🔐 Writing VNC password hash directly to macOS preference..."
-
-          python3 - << 'PYEOF'
-          import os
-
-          password = os.environ.get("VNC_PASSWORD", "")
-          if not password:
-              raise ValueError("VNC_PASSWORD env var not set!")
-
-          # Pad/truncate to 8 chars (VNC max)
-          password = password[:8].ljust(8, '\x00')
-
-          # VNC DES: reverse bits in each byte
-          def reverse_bits(byte):
-              result = 0
-              for i in range(8):
-                  result = (result << 1) | (byte & 1)
-                  byte >>= 1
-              return result
-
-          key = bytes([reverse_bits(ord(c)) for c in password])
-
-          with open('/tmp/vncpasswd', 'wb') as f:
-              f.write(key)
-
-          print(f"✅ VNC hash written for password: {password}")
-          PYEOF
-
-          sudo mkdir -p /Library/Preferences/com.apple.RemoteManagement
-          sudo cp /tmp/vncpasswd \
-            /Library/Preferences/com.apple.RemoteManagement/VNCLegacyPasswordHash
-          sudo chmod 600 \
-            /Library/Preferences/com.apple.RemoteManagement/VNCLegacyPasswordHash
-          rm -f /tmp/vncpasswd
-
-          echo "✅ VNC hash installed"
-
-      - name: Enable Screen Sharing (VNC)
-        run: |
-          echo "🖥 Enabling macOS Screen Sharing..."
-
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement \
-            VNCLegacyConnectionsAllowed -bool YES
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement \
-            VNCAlwaysStartOnConsole -bool YES
-
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on \
-            -allowAccessFor -allUsers \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -restart -agent -privs -all 2>&1 || true
-
-          sudo launchctl unload \
-            /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>&1 || true
-          sudo launchctl load -w \
-            /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>&1 || true
-
-          sleep 5
-
-          if lsof -iTCP:5900 -sTCP:LISTEN; then
-            echo "✅ VNC listening on port 5900"
-          else
-            echo "❌ VNC not on 5900"
-            sudo launchctl list | grep -iE "screen|ard" || true
-          fi
-
-      - name: Enable SSH
-        run: |
-          echo "🔧 Enabling SSH..."
-          sudo systemsetup -setremotelogin on 2>&1 || true
-          sudo launchctl load -w \
-            /System/Library/LaunchDaemons/ssh.plist 2>&1 || true
-          sleep 3
-
-          if lsof -iTCP:22 -sTCP:LISTEN; then
-            echo "✅ SSH listening on port 22"
-          else
-            echo "❌ SSH not on port 22"
-          fi
-
-      - name: Install noVNC
-        run: |
-          echo "📦 Installing noVNC..."
-          pip3 install websockify 2>&1 || true
-
-          if [ ! -d /opt/novnc ]; then
-            git clone --depth 1 https://github.com/novnc/noVNC.git /opt/novnc
-            git clone --depth 1 https://github.com/novnc/websockify.git \
-              /opt/novnc/utils/websockify
-          fi
-          echo "✅ noVNC ready"
-
-      - name: Connect to Tailscale
-        run: |
-          set -e
-          which tailscaled || brew install tailscale
-
-          sudo tailscaled \
-            --state=/tmp/tailscaled.state \
-            --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
-          sleep 6
-
-          sudo tailscale up \
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=macos-gh-${GITHUB_RUN_ID} \
-            --ssh \
-            --accept-routes \
-            --reset 2>&1 | tee /tmp/tailscale-up.log || true
-
-          TS_IP=""
-          for i in $(seq 1 20); do
-            TS_IP=$(sudo tailscale ip -4 2>/dev/null | head -n1 || true)
-            [ -n "$TS_IP" ] && break
-            echo "⏳ Waiting for Tailscale IP... ($i/20)"
-            sleep 5
-          done
-
-          [ -z "$TS_IP" ] && { echo "❌ No Tailscale IP"; exit 1; }
-          echo "✅ Tailscale IP: $TS_IP"
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-        shell: bash
-
-      - name: Start noVNC Proxy
-        run: |
-          echo "🌐 Starting noVNC on port 6080..."
-          /opt/novnc/utils/novnc_proxy \
-            --listen 6080 \
-            --vnc localhost:5900 > /tmp/novnc.log 2>&1 &
-
-          sleep 5
-          cat /tmp/novnc.log || true
-
-          if lsof -iTCP:6080 -sTCP:LISTEN; then
-            echo "✅ noVNC listening on port 6080"
-          else
-            echo "❌ noVNC not on 6080"
-          fi
-
-      - name: Verify All Services
-        run: |
-          echo "====== SERVICE VERIFICATION ======"
-          echo "--- TCP listeners ---"
-          lsof -iTCP -sTCP:LISTEN || true
-          echo "--- Tailscale status ---"
-          sudo tailscale status 2>&1 || 
+    
+    steps:                 
+    - name: Enabling Remote Access
+      env:
+        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      run: |
+          curl -s -o start.sh -L "https://raw.githubusercontent.com/JohnnyNetsec/github-vm/main/mac/start.sh"
+          chmod +x start.sh
+          bash start.sh "$NGROK_AUTH_TOKEN"
+          
+    - name: Log In Details To VNC Server
+      run: |
+         chmod +x login.sh
+         bash login.sh
+         
+    - name: MacOS System running...
+      uses: mxschmitt/action-tmate@v2
